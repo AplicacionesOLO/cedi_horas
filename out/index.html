@@ -21,7 +21,7 @@
 <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
 <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
 <script crossorigin src="https://unpkg.com/prop-types@15/prop-types.min.js"></script>
-<script crossorigin src="https://unpkg.com/recharts@2/umd/Recharts.min.js"></script>
+<script crossorigin src="https://cdn.jsdelivr.net/npm/recharts@2.15.4/umd/Recharts.js"></script>
 <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
 
 <!-- Conexión a Supabase (ver CONECTAR_SUPABASE.md) -->
@@ -53,7 +53,10 @@
   function requireFalso(nombre) {
     if (nombre === "react") return window.React;
     if (nombre === "react-dom" || nombre === "react-dom/client") return window.ReactDOM;
-    if (nombre === "recharts") return window.Recharts || {};
+    if (nombre === "recharts") {
+      if (!window.Recharts) throw new Error("No se cargó Recharts (revisá conexión o bloqueadores de scripts).");
+      return window.Recharts;
+    }
     throw new Error("Módulo no disponible: " + nombre);
   }
 
