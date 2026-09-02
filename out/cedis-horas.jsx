@@ -326,21 +326,36 @@ const sb = () =>
     : null;
 
 const almacen = {
+  // Guarda el último diagnóstico para que la UI pueda avisar.
+  ultimoError: null,
   async leer(k) {
     // 1) Supabase (fuente de verdad)
     const cli = sb();
+    let remoto = null, huboError = false;
     if (cli) {
       try {
         const { data, error } = await cli
           .from("app_estado").select("datos").eq("clave", k).maybeSingle();
-        if (!error && data && data.datos) { memoria[k] = data.datos; return data.datos; }
-        if (!error) return null;                 // conectó pero no hay fila aún
-        console.warn("[almacen] lectura Supabase:", error.message);
-      } catch (e) { console.warn("[almacen] Supabase no disponible al leer:", e); }
+        if (error) {
+          huboError = true;
+          this.ultimoError = "Lectura: " + error.message;
+          console.warn("[almacen] lectura Supabase:", error.message);
+        } else if (data && data.datos) {
+          remoto = data.datos;
+        }
+      } catch (e) {
+        huboError = true;
+        console.warn("[almacen] Supabase no disponible al leer:", e);
+      }
     }
     // 2) Respaldo local
-    try { const r = localStorage.getItem(k); if (r) return JSON.parse(r); } catch {}
-    return memoria[k] ?? null;
+    let local = null;
+    try { const r = localStorage.getItem(k); if (r) local = JSON.parse(r); } catch {}
+
+    // Preferimos lo remoto; si no hay o falló, usamos lo local para no perder de vista los datos.
+    const elegido = remoto || local || memoria[k] || null;
+    if (elegido) memoria[k] = elegido;
+    return elegido;
   },
   async escribir(k, v) {
     memoria[k] = v;
@@ -353,9 +368,19 @@ const almacen = {
         const { error } = await cli
           .from("app_estado")
           .upsert({ clave: k, datos: v }, { onConflict: "clave" });
-        if (error) console.warn("[almacen] escritura Supabase:", error.message);
-      } catch (e) { console.warn("[almacen] Supabase no disponible al escribir:", e); }
+        if (error) {
+          this.ultimoError = "Guardado: " + error.message;
+          console.warn("[almacen] escritura Supabase:", error.message);
+          return { ok: false, error: error.message };
+        }
+        this.ultimoError = null;
+        return { ok: true };
+      } catch (e) {
+        console.warn("[almacen] Supabase no disponible al escribir:", e);
+        return { ok: false, error: String(e && e.message || e) };
+      }
     }
+    return { ok: false, error: "Sin cliente Supabase" };
   },
 };
 
@@ -522,6 +547,42 @@ function descargarCSV(nombre, filas) {
   const url = URL.createObjectURL(new Blob(["\uFEFF" + csv], { type: "text/csv;charset=utf-8;" }));
   const a = document.createElement("a");
   a.href = url; a.download = nombre; a.click();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+/* ── exportar a Excel (.xls) ──
+   Genera un libro con una o varias hojas usando SpreadsheetML (XML de Excel).
+   Cada hoja = { nombre, filas: [[celda, celda…], …] }. La primera fila es el encabezado.
+   Excel lo abre nativo, con columnas separadas y números como números. */
+function descargarExcel(nombreArchivo, hojas) {
+  const esc = (s) => String(s ?? "")
+    .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+  const celda = (v, esEncabezado) => {
+    const num = typeof v === "number" && isFinite(v);
+    const tipo = num ? "Number" : "String";
+    const estilo = esEncabezado ? ' ss:StyleID="hd"' : "";
+    return `<Cell${estilo}><Data ss:Type="${tipo}">${esc(v)}</Data></Cell>`;
+  };
+  const hojaXml = (h) => {
+    const filas = (h.filas || []).map((fila, i) =>
+      `<Row>${fila.map(c => celda(c, i === 0)).join("")}</Row>`).join("");
+    const nombre = esc((h.nombre || "Hoja").slice(0, 31)).replace(/[\\/?*\[\]:]/g, " ");
+    return `<Worksheet ss:Name="${nombre}"><Table>${filas}</Table></Worksheet>`;
+  };
+  const xml =
+    '<?xml version="1.0" encoding="UTF-8"?>' +
+    '<?mso-application progid="Excel.Sheet"?>' +
+    '<Workbook xmlns="urn:schemas-microsoft-com:office:spreadsheet" ' +
+    'xmlns:ss="urn:schemas-microsoft-com:office:spreadsheet">' +
+    '<Styles><Style ss:ID="hd"><Font ss:Bold="1"/>' +
+    '<Interior ss:Color="#251E1F" ss:Pattern="Solid"/>' +
+    '<Font ss:Color="#FFFFFF" ss:Bold="1"/></Style></Styles>' +
+    (hojas || []).map(hojaXml).join("") +
+    '</Workbook>';
+  const url = URL.createObjectURL(new Blob(["\uFEFF" + xml], { type: "application/vnd.ms-excel;charset=utf-8;" }));
+  const a = document.createElement("a");
+  a.href = url; a.download = nombreArchivo.endsWith(".xls") ? nombreArchivo : nombreArchivo + ".xls";
+  a.click();
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
@@ -877,23 +938,80 @@ function Semana({ datos, offset, setOffset }) {
 const claveMes = (iso) => iso.slice(0, 7);
 const nombreMes = (k) => { const [a,m] = k.split("-"); return `${MESES[Number(m)-1]} ${a}`; };
 
+/* Tabla de reporte agregada con barra de proporción y botón de descarga Excel. */
+function TablaReporte({ titulo, etiqueta, filas, totalCosto, onExcel }) {
+  const max = Math.max(...filas.map(f => f.costo), 1);
+  return (
+    <div className="placa">
+      <div className="placa-cab">
+        <h2>{titulo}</h2>
+        <button className="btn btn-2 btn-s" onClick={onExcel} disabled={!filas.length}>Descargar Excel</button>
+      </div>
+      {!filas.length ? <div className="vacio"><p>Sin movimientos en el período.</p></div> : (
+        <div className="tabla-env">
+          <table>
+            <thead><tr>
+              <th>{etiqueta}</th><th className="n">Turnos</th><th className="n">Personas</th>
+              <th className="n">Horas</th><th className="n">Costo</th><th className="n">%</th>
+            </tr></thead>
+            <tbody>
+              {filas.map(r => (
+                <tr key={r.nombre}>
+                  <td style={{ fontWeight: 500 }}>{r.nombre}
+                    <div className="pista" style={{ marginTop: 5 }}><i style={{ width: `${(r.costo/max)*100}%` }} /></div>
+                  </td>
+                  <td className="n">{r.turnos}</td>
+                  <td className="n">{r.personas}</td>
+                  <td className="n">{hh(r.horas)}</td>
+                  <td className="n" style={{ fontWeight: 600 }}>{crc(r.costo)}</td>
+                  <td className="n" style={{ color: "var(--tinta-2)" }}>{pct(r.costo / (totalCosto || 1))}</td>
+                </tr>
+              ))}
+              <tr className="tot">
+                <td>Total</td>
+                <td className="n">{filas.reduce((s,r)=>s+r.turnos,0)}</td>
+                <td className="n"></td>
+                <td className="n">{hh(filas.reduce((s,r)=>s+r.horas,0))}</td>
+                <td className="n">{crc(totalCosto)}</td>
+                <td className="n">100%</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function Tablero({ datos, setPresupuesto }) {
   const T = datos.tarifa;
   const [semanasBase, setSemanasBase] = useState(8);   // ventana de análisis (4–8)
   const [horizonte, setHorizonte] = useState(4);
+
+  /* — filtros de cliente y departamento (afectan todo el tablero) — */
+  const [fCliente, setFCliente] = useState("");        // "" = todos
+  const [fDepto, setFDepto] = useState("");            // "" = todos
+
+  const turnos = useMemo(() =>
+    datos.turnos.filter(t =>
+      (!fCliente || t.cliente === fCliente) &&
+      (!fDepto || t.departamento === fDepto)),
+    [datos.turnos, fCliente, fDepto]);
+
+  const hayFiltro = !!(fCliente || fDepto);
 
   /* — serie por ciclo Vie→Jue (12 ciclos hacia atrás, sin incluir el abierto) — */
   const serie = useMemo(() => {
     const out = [];
     for (let i = 12; i >= 1; i--) {
       const c = ciclo(new Date(), -i);
-      const ts = datos.turnos.filter(t => enRango(t.fecha, c));
+      const ts = turnos.filter(t => enRango(t.fecha, c));
       const h = ts.reduce((s,t) => s + horasTurno(t.entrada, t.salida, t.descansoMin), 0);
       out.push({ etiqueta: c.etiqueta, inicio: c.inicio, horas: Math.round(h*100)/100, costo: Math.round(h*T),
                  personas: new Set(ts.map(t => t.colaborador)).size });
     }
     return out;
-  }, [datos.turnos, T]);
+  }, [turnos, T]);
 
   const conDatos = serie.filter(s => s.horas > 0);
   const ventana = conDatos.slice(-semanasBase);
@@ -916,7 +1034,7 @@ function Tablero({ datos, setPresupuesto }) {
   /* — histórico mensual — */
   const meses = useMemo(() => {
     const m = new Map();
-    datos.turnos.forEach(t => {
+    turnos.forEach(t => {
       const k = claveMes(t.fecha);
       const h = horasTurno(t.entrada, t.salida, t.descansoMin);
       const a = m.get(k) || { k, horas: 0 };
@@ -925,13 +1043,13 @@ function Tablero({ datos, setPresupuesto }) {
     return [...m.values()].sort((a,b) => a.k.localeCompare(b.k)).slice(-12)
       .map(x => ({ ...x, horas: Math.round(x.horas*100)/100, costo: Math.round(x.horas*T),
                    etiqueta: nombreMes(x.k), presupuesto: datos.presupuestos[x.k] || 0 }));
-  }, [datos.turnos, datos.presupuestos, T]);
+  }, [turnos, datos.presupuestos, T]);
 
   /* — presupuesto del mes seleccionado — */
   const [mesSel, setMesSel] = useState(claveMes(hoyISO()));
   const presupuesto = datos.presupuestos[mesSel] || 0;
-  const gastoMes = useMemo(() => datos.turnos.filter(t => claveMes(t.fecha) === mesSel)
-    .reduce((s,t) => s + horasTurno(t.entrada, t.salida, t.descansoMin), 0) * T, [datos.turnos, mesSel, T]);
+  const gastoMes = useMemo(() => turnos.filter(t => claveMes(t.fecha) === mesSel)
+    .reduce((s,t) => s + horasTurno(t.entrada, t.salida, t.descansoMin), 0) * T, [turnos, mesSel, T]);
   const esMesActual = mesSel === claveMes(hoyISO());
   const ej = ejecucion(gastoMes, presupuesto, esMesActual ? new Date() : new Date(Number(mesSel.slice(0,4)), Number(mesSel.slice(5,7)), 0));
   const opcionesMes = useMemo(() => {
@@ -939,14 +1057,95 @@ function Tablero({ datos, setPresupuesto }) {
     return [...s].sort().reverse();
   }, [datos.presupuestos, datos.turnos]);
 
-  const anioHoras = datos.turnos.filter(t => t.fecha.startsWith(hoyISO().slice(0,4)))
+  const anioHoras = turnos.filter(t => t.fecha.startsWith(hoyISO().slice(0,4)))
     .reduce((s,t) => s + horasTurno(t.entrada, t.salida, t.descansoMin), 0);
+
+  /* — reportes agregados (respetan los filtros) — */
+  const agrupar = (campo) => {
+    const m = new Map();
+    turnos.forEach(t => {
+      const clave = t[campo] || "(sin dato)";
+      const h = horasTurno(t.entrada, t.salida, t.descansoMin);
+      const a = m.get(clave) || { nombre: clave, turnos: 0, horas: 0, personas: new Set() };
+      a.turnos += 1; a.horas += h; a.personas.add(t.colaborador);
+      m.set(clave, a);
+    });
+    return [...m.values()]
+      .map(x => ({ nombre: x.nombre, turnos: x.turnos, horas: Math.round(x.horas*100)/100,
+                   personas: x.personas.size, costo: Math.round(x.horas*T) }))
+      .sort((a,b) => b.costo - a.costo);
+  };
+  const repCliente = useMemo(() => agrupar("cliente"), [turnos, T]);
+  const repDepto = useMemo(() => agrupar("departamento"), [turnos, T]);
+  const repColaborador = useMemo(() => agrupar("colaborador"), [turnos, T]);
+
+  const totHoras = turnos.reduce((s,t) => s + horasTurno(t.entrada, t.salida, t.descansoMin), 0);
+  const totCosto = Math.round(totHoras * T);
+
+  const filasReporte = (rep, etiqueta) => [
+    [etiqueta, "Turnos", "Personas", "Horas", "Costo ₡"],
+    ...rep.map(r => [r.nombre, r.turnos, r.personas, r.horas, r.costo]),
+    ["TOTAL", turnos.length, new Set(turnos.map(t=>t.colaborador)).size, Math.round(totHoras*100)/100, totCosto],
+  ];
+
+  const filasDetalle = () => [
+    ["Fecha","Departamento","Colaborador","Cliente","Entrada","Salida","Descanso min","Horas","Costo ₡","Embarques","Nota"],
+    ...turnos.slice().sort((a,b) => a.fecha.localeCompare(b.fecha)).map(t => {
+      const h = horasTurno(t.entrada, t.salida, t.descansoMin);
+      return [t.fecha, t.departamento, t.colaborador, t.cliente, t.entrada, t.salida,
+              t.descansoMin || 0, Math.round(h*100)/100, Math.round(h*T),
+              (t.embarques||[]).map(e => e.codigo).join(" | "), t.nota || ""];
+    }),
+  ];
+
+  const sufijoFiltro = (fCliente ? "_" + fCliente : "") + (fDepto ? "_" + fDepto : "");
+
+  const exportarTodo = () => {
+    descargarExcel(`reporte_horas${sufijoFiltro}`, [
+      { nombre: "Por cliente", filas: filasReporte(repCliente, "Cliente") },
+      { nombre: "Por departamento", filas: filasReporte(repDepto, "Departamento") },
+      { nombre: "Por colaborador", filas: filasReporte(repColaborador, "Colaborador") },
+      { nombre: "Mensual", filas: [
+        ["Mes","Horas","Costo ₡","Presupuesto ₡","Ejecución %"],
+        ...meses.slice().reverse().map(m => [m.etiqueta, m.horas, m.costo, m.presupuesto || 0,
+          m.presupuesto ? Math.round(100*m.costo/m.presupuesto) : ""]),
+      ]},
+      { nombre: "Detalle", filas: filasDetalle() },
+    ]);
+  };
 
   const tooltipStyle = { background: MARCA.tinta, border: 0, color: "#fff", fontSize: 12, fontFamily: MARCA.dato };
   const ejeTick = { fontSize: 10, fontFamily: MARCA.dato, fill: MARCA.tinta3 };
 
   return (
     <div className="marco">
+      {/* ── FILTROS ── */}
+      <div className="placa" style={{ marginTop: 14 }}>
+        <div className="placa-cue" style={{ display: "flex", gap: 14, alignItems: "flex-end", flexWrap: "wrap" }}>
+          <label className="campo" style={{ margin: 0, minWidth: 200, flex: "1 1 200px" }}><span>Cliente</span>
+            <select value={fCliente} onChange={e => setFCliente(e.target.value)}>
+              <option value="">Todos los clientes</option>
+              {datos.clientes.map(c => <option key={c} value={c}>{c}</option>)}
+            </select>
+          </label>
+          <label className="campo" style={{ margin: 0, minWidth: 200, flex: "1 1 200px" }}><span>Departamento</span>
+            <select value={fDepto} onChange={e => setFDepto(e.target.value)}>
+              <option value="">Todos los departamentos</option>
+              {datos.departamentos.map(d => <option key={d} value={d}>{d}</option>)}
+            </select>
+          </label>
+          {hayFiltro && (
+            <button className="btn btn-2 btn-s" onClick={() => { setFCliente(""); setFDepto(""); }}>Limpiar filtros</button>
+          )}
+          <button className="btn btn-senal btn-s" onClick={exportarTodo}>Descargar Excel (todo)</button>
+        </div>
+        {hayFiltro && (
+          <div className="placa-cue" style={{ paddingTop: 0, color: "var(--tinta-2)", fontSize: 13 }}>
+            Mostrando {turnos.length} turno(s){fCliente ? ` · cliente: ${fCliente}` : ""}{fDepto ? ` · depto: ${fDepto}` : ""}.
+          </div>
+        )}
+      </div>
+
       <div className="rejilla g4" style={{ marginTop: 14 }}>
         <Kpi rot={`Horas ${hoyISO().slice(0,4)}`} valor={hh(anioHoras)} sub="personal externo, año a la fecha" />
         <Kpi rot={`Costo ${hoyISO().slice(0,4)}`} valor={crcK(anioHoras * T)} sub={crc(anioHoras * T)} />
@@ -1111,6 +1310,49 @@ function Tablero({ datos, setPresupuesto }) {
             </div>
           </>)}
         </div>
+      </div>
+
+      {/* ── REPORTES POR CLIENTE / DEPARTAMENTO / COLABORADOR ── */}
+      <TablaReporte titulo="Reporte por cliente" etiqueta="Cliente" filas={repCliente} totalCosto={totCosto}
+        onExcel={() => descargarExcel(`reporte_cliente${sufijoFiltro}`, [{ nombre: "Por cliente", filas: filasReporte(repCliente, "Cliente") }])} />
+
+      <TablaReporte titulo="Reporte por departamento" etiqueta="Departamento" filas={repDepto} totalCosto={totCosto}
+        onExcel={() => descargarExcel(`reporte_departamento${sufijoFiltro}`, [{ nombre: "Por departamento", filas: filasReporte(repDepto, "Departamento") }])} />
+
+      <TablaReporte titulo="Reporte por colaborador" etiqueta="Colaborador" filas={repColaborador} totalCosto={totCosto}
+        onExcel={() => descargarExcel(`reporte_colaborador${sufijoFiltro}`, [{ nombre: "Por colaborador", filas: filasReporte(repColaborador, "Colaborador") }])} />
+
+      {/* ── DETALLE COMPLETO ── */}
+      <div className="placa">
+        <div className="placa-cab">
+          <h2>Detalle de turnos</h2>
+          <button className="btn btn-2 btn-s" onClick={() => descargarExcel(`detalle_turnos${sufijoFiltro}`, [{ nombre: "Detalle", filas: filasDetalle() }])}
+            disabled={!turnos.length}>Descargar Excel</button>
+        </div>
+        {!turnos.length ? <div className="vacio"><p>Sin turnos en el filtro seleccionado.</p></div> : (
+          <div className="tabla-env">
+            <table>
+              <thead><tr>
+                <th>Fecha</th><th>Departamento</th><th>Colaborador</th><th>Cliente</th>
+                <th className="n">Horas</th><th className="n">Costo</th>
+              </tr></thead>
+              <tbody>
+                {turnos.slice().sort((a,b) => b.fecha.localeCompare(a.fecha) || (b.entrada||"").localeCompare(a.entrada||"")).slice(0, 200).map(t => {
+                  const h = horasTurno(t.entrada, t.salida, t.descansoMin);
+                  return (
+                    <tr key={t.id}>
+                      <td className="n">{fmtCorto(t.fecha)}</td>
+                      <td>{t.departamento}</td><td>{t.colaborador}</td><td>{t.cliente}</td>
+                      <td className="n">{hh(h)}</td>
+                      <td className="n" style={{ fontWeight: 600 }}>{crc(Math.round(h*T))}</td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+            {turnos.length > 200 && <p className="kpi-s" style={{ padding: "10px 14px" }}>Mostrando los 200 más recientes. Descargá el Excel para ver todos ({turnos.length}).</p>}
+          </div>
+        )}
       </div>
     </div>
   );
@@ -1376,10 +1618,15 @@ export default function App() {
   useEffect(() => {
     if (cargando) return;
     if (primera.current) { primera.current = false; return; }
-    almacen.escribir(K_DATOS, datos);
+    (async () => {
+      const r = await almacen.escribir(K_DATOS, datos);
+      if (r && r.ok === false) {
+        avisar("No se pudo guardar en la nube (permisos). Se guardó local. Revisá que tu usuario tenga rol asignado.");
+      }
+    })();
   }, [datos, cargando]);
 
-  const avisar = (m) => { setToast(m); setTimeout(() => setToast(null), 3800); };
+  const avisar = (m) => { setToast(m); setTimeout(() => setToast(null), 4600); };
 
   const guardarTurno = (t) => setDatos(d => ({
     ...d,
