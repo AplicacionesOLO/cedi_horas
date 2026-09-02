@@ -52,3 +52,38 @@ ON CONFLICT (usuario_id, rol_id) DO NOTHING;
 
 -- C) Verificar de nuevo el punto 2. Cuando tu correo tenga rol,
 --    recargá la app: ya deberías ver y guardar datos.
+
+
+-- ═══════════════════════════════════════════════════════════════════════
+-- 4) ¿QUÉ FECHAS TIENEN LOS TURNOS GUARDADOS?  (clave para la vista Semana)
+--    Corré esto y mirá las fechas: la vista Semana agrupa por ciclo
+--    VIERNES → JUEVES. Un turno del 2/9/2026 (miércoles) cae en el ciclo
+--    viernes 28/08 → jueves 03/09.
+-- ═══════════════════════════════════════════════════════════════════════
+
+SELECT
+  t->>'fecha'                              AS fecha,
+  count(*)                                 AS turnos,
+  string_agg(DISTINCT t->>'colaborador', ', ') AS colaboradores
+FROM public.app_estado ae,
+     jsonb_array_elements(ae.datos->'turnos') AS t
+WHERE ae.clave = 'cedis:datos:v2'
+GROUP BY t->>'fecha'
+ORDER BY fecha DESC;
+
+-- Ver el rango de fechas y el total:
+SELECT
+  min(t->>'fecha') AS fecha_min,
+  max(t->>'fecha') AS fecha_max,
+  count(*)         AS total_turnos
+FROM public.app_estado ae,
+     jsonb_array_elements(ae.datos->'turnos') AS t
+WHERE ae.clave = 'cedis:datos:v2';
+
+-- Ver un turno completo para revisar el FORMATO exacto de la fecha
+-- (debe ser 'YYYY-MM-DD', p.ej. '2026-09-02'):
+SELECT jsonb_pretty(t)
+FROM public.app_estado ae,
+     jsonb_array_elements(ae.datos->'turnos') AS t
+WHERE ae.clave = 'cedis:datos:v2'
+LIMIT 3;

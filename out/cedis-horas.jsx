@@ -528,15 +528,31 @@ function CintaCiclo({ turnos, rango, tarifa, titulo, derecha }) {
 }
 
 /* ── selector de ciclo con flechas ── */
-const PasoCiclo = ({ offset, setOffset }) => (
-  <div className="paso">
-    <button onClick={() => setOffset(offset - 1)} aria-label="Ciclo anterior">‹</button>
-    <span className="rot-b" style={{ fontSize: 12, minWidth: 96, textAlign: "center" }}>
-      {offset === 0 ? "En curso" : offset === -1 ? "Recién cerrado" : `${Math.abs(offset)} ciclos atrás`}
-    </span>
-    <button onClick={() => setOffset(Math.min(0, offset + 1))} disabled={offset >= 0} aria-label="Ciclo siguiente">›</button>
-  </div>
-);
+// Convierte una fecha ISO en el offset (nº de ciclos respecto al ciclo en curso).
+const offsetDeFecha = (iso) => {
+  const inicioCurso = ciclo(new Date(), 0).inicio;
+  const inicioSel = ciclo(aFecha(iso), 0).inicio;
+  const dias = Math.round((aFecha(inicioSel) - aFecha(inicioCurso)) / 86400000);
+  return Math.min(0, Math.round(dias / 7));
+};
+
+const PasoCiclo = ({ offset, setOffset }) => {
+  const rango = ciclo(new Date(), offset);
+  return (
+    <div className="paso" style={{ flexWrap: "wrap", justifyContent: "flex-end" }}>
+      <button onClick={() => setOffset(offset - 1)} aria-label="Ciclo anterior">‹</button>
+      <span className="rot-b" style={{ fontSize: 12, minWidth: 96, textAlign: "center" }}>
+        {offset === 0 ? "En curso" : offset === -1 ? "Recién cerrado" : `${Math.abs(offset)} ciclos atrás`}
+      </span>
+      <button onClick={() => setOffset(Math.min(0, offset + 1))} disabled={offset >= 0} aria-label="Ciclo siguiente">›</button>
+      {/* Saltar a la semana de cualquier día */}
+      <input type="date" className="num-in" value={rango.inicio} max={hoyISO()}
+        title="Ir a la semana de esta fecha"
+        onChange={(e) => { if (e.target.value) setOffset(offsetDeFecha(e.target.value)); }}
+        style={{ width: "auto", padding: "6px 8px", fontSize: 13 }} />
+    </div>
+  );
+};
 
 /* ── exportar CSV ── */
 function descargarCSV(nombre, filas) {
@@ -824,6 +840,16 @@ function Semana({ datos, offset, setOffset }) {
   const porDepto   = agrupar(enCiclo, "departamento", T);
   const porPersona = agrupar(enCiclo, "colaborador", T);
 
+  // Si el ciclo mostrado está vacío, buscá el ciclo más reciente que sí tenga turnos.
+  const cicloConDatos = useMemo(() => {
+    if (enCiclo.length || !datos.turnos.length) return null;
+    for (let o = 0; o >= -12; o--) {
+      const c = ciclo(new Date(), o);
+      if (datos.turnos.some(t => enRango(t.fecha, c))) return { offset: o, rango: c };
+    }
+    return null;
+  }, [enCiclo.length, datos.turnos]);
+
   const exportar = () => {
     const filas = [["Fecha","Departamento","Colaborador","Cliente","Entrada","Salida","Descanso (min)","Horas","Tarifa CRC","Costo CRC","Embarques","Observaciones"]];
     enCiclo.slice().sort((a,b) => a.fecha.localeCompare(b.fecha)).forEach(t => {
@@ -858,6 +884,15 @@ function Semana({ datos, offset, setOffset }) {
             Este ciclo todavía está abierto. El corte de auditoría se hace el viernes sobre el ciclo recién cerrado
             ({fmtLargo(previo.inicio)} → {fmtLargo(previo.fin)}).{" "}
             <button className="lig" onClick={() => setOffset(-1)}>Ver ese ciclo</button>
+          </div>
+        )}
+
+        {cicloConDatos && (
+          <div className="aviso" style={{ marginTop: 14 }}>
+            No hay turnos en el ciclo mostrado. El ciclo más reciente con registros es
+            {" "}{fmtLargo(cicloConDatos.rango.inicio)} → {fmtLargo(cicloConDatos.rango.fin)}
+            {cicloConDatos.offset === 0 ? " (en curso)" : cicloConDatos.offset === -1 ? " (recién cerrado)" : ""}.{" "}
+            <button className="lig" onClick={() => setOffset(cicloConDatos.offset)}>Ver ese ciclo</button>
           </div>
         )}
 
@@ -1575,7 +1610,8 @@ export default function App() {
   const [datos, setDatos] = useState(BASE);
   const [cargando, setCargando] = useState(true);
   const [tab, setTab] = useState("registro");
-  const [offset, setOffset] = useState(-1);          // el viernes se audita el ciclo cerrado
+  const [offset, setOffset] = useState(0);           // arranca en el ciclo en curso; se ajusta al cargar datos
+  const ajusteOffset = useRef(false);
   const [toast, setToast] = useState(null);
   const primera = useRef(true);
 
@@ -1609,7 +1645,21 @@ export default function App() {
     let vivo = true;
     (async () => {
       const g = await almacen.leer(K_DATOS);
-      if (vivo && g) setDatos({ ...BASE, ...g });
+      if (vivo && g) {
+        setDatos({ ...BASE, ...g });
+        // Al cargar por primera vez, abrí Semana en el ciclo que contiene el
+        // turno MÁS RECIENTE, calculando el offset exacto (sea cual sea el ciclo).
+        if (!ajusteOffset.current && Array.isArray(g.turnos) && g.turnos.length) {
+          ajusteOffset.current = true;
+          const fechaMax = g.turnos.reduce((max, t) => (t.fecha > max ? t.fecha : max), g.turnos[0].fecha);
+          // offset = cuántas semanas separan el ciclo del turno del ciclo en curso.
+          const inicioCurso = ciclo(new Date(), 0).inicio;
+          const inicioTurno = ciclo(aFecha(fechaMax), 0).inicio;
+          const dias = Math.round((aFecha(inicioTurno) - aFecha(inicioCurso)) / 86400000);
+          const off = Math.round(dias / 7);
+          setOffset(Math.min(0, off));   // nunca hacia el futuro
+        }
+      }
       if (vivo) setCargando(false);
     })();
     return () => { vivo = false; };
