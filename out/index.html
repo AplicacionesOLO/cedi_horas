@@ -37,10 +37,10 @@
 </noscript>
 
 <!--
-  Carga el fuente cedis-horas.jsx, neutraliza sus imports (React y recharts ya
-  están como globales por los <script> de arriba), lo transpila con Babel en el
-  navegador y monta <App/>. Así el HTML corre exactamente el mismo código fuente,
-  sin necesitar un paso de build.
+  Carga el fuente cedis-horas.jsx, lo transpila con Babel en el navegador
+  (JSX + módulos ESM → CommonJS) y monta <App/>. Los import de "react" y
+  "recharts" se resuelven contra los globales UMD cargados arriba.
+  Así el HTML corre exactamente el mismo código fuente, sin paso de build.
 -->
 <script>
 (function () {
@@ -49,35 +49,37 @@
       '<div id="sinjs"><strong>No se pudo cargar la aplicación.</strong><br>' + msg + '</div>';
   }
 
+  // Resuelve los import del fuente ("react" y "recharts") contra los globales UMD.
+  function requireFalso(nombre) {
+    if (nombre === "react") return window.React;
+    if (nombre === "react-dom" || nombre === "react-dom/client") return window.ReactDOM;
+    if (nombre === "recharts") return window.Recharts || {};
+    throw new Error("Módulo no disponible: " + nombre);
+  }
+
   fetch("./cedis-horas.jsx", { cache: "no-store" })
     .then(function (r) { if (!r.ok) throw new Error("HTTP " + r.status); return r.text(); })
     .then(function (fuente) {
-      // 1) Quitar las líneas de import (usamos los globales React y Recharts).
-      var codigo = fuente
-        .replace(/^\s*import\s+React[\s\S]*?from\s+["']react["'];?/m, "")
-        .replace(/^\s*import\s*\{[\s\S]*?\}\s*from\s+["']recharts["'];?/m, "");
+      // Babel convierte JSX y transforma los import/export ESM a CommonJS,
+      // así no dependemos de regex para quitar los imports (más robusto).
+      var salida = Babel.transform(fuente, {
+        presets: [["react", { runtime: "classic" }]],
+        plugins: ["transform-modules-commonjs"],
+        sourceType: "module",
+      }).code;
 
-      // 2) Preludio: desestructurar hooks y componentes de recharts desde los globales.
-      var preludio =
-        "const { useState, useEffect, useMemo, useRef } = React;\n" +
-        "const {\n" +
-        "  ResponsiveContainer, ComposedChart, Bar, Line, Area, XAxis, YAxis,\n" +
-        "  CartesianGrid, Tooltip, ReferenceLine, Cell, LineChart\n" +
-        "} = (window.Recharts || {});\n";
+      // Ejecuta el módulo transpilado dándole un require/module/exports falsos.
+      var modulo = { exports: {} };
+      var fn = new Function("require", "module", "exports", "React", "ReactDOM", salida);
+      fn(requireFalso, modulo, modulo.exports, window.React, window.ReactDOM);
 
-      // 3) Quitar 'export default' y exponer App en window.
-      codigo = codigo.replace(/export\s+default\s+function\s+App/, "function App");
-      var epilogo = "\nwindow.__OLO_APP__ = App;\n";
+      // El componente App se exporta como default.
+      var App = modulo.exports && (modulo.exports.default || modulo.exports.App);
+      if (!App) throw new Error("No se encontró el componente App exportado.");
 
-      // 4) Transpilar JSX → JS y ejecutar.
-      var salida = Babel.transform(preludio + codigo + epilogo, { presets: ["react"] }).code;
-      var run = new Function(salida);
-      run();
-
-      if (!window.__OLO_APP__) throw new Error("No se encontró el componente App.");
       var cont = document.getElementById("app");
       cont.innerHTML = "";
-      ReactDOM.createRoot(cont).render(React.createElement(window.__OLO_APP__));
+      ReactDOM.createRoot(cont).render(React.createElement(App));
     })
     .catch(function (e) {
       fallo("Serví la carpeta con un servidor web (no abras el archivo con file://). Detalle: " + e.message);
