@@ -17,52 +17,98 @@ Así, los datos ya no viven solo en el navegador: viven en Supabase y se compart
 
 | Pieza | Para qué |
 |---|---|
-| `supabse/app_estado.sql` | ✅ **Corré este** para conectar el frontend actual. Crea la tabla que guarda el estado JSON. |
-| `supabse/supabase_migracion.sql` | Modelo normalizado completo (tablas + RPC + RLS por rol + login). Para la versión "en serio" con autenticación. Opcional por ahora. |
+| `supabse/app_estado.sql` | ✅ **Corré 1º.** Crea la tabla que guarda el estado JSON del frontend. |
+| `supabse/roles.sql` | ✅ **Corré 2º.** Login + roles (`usuarios`, `roles`, `usuarios_roles`) y cierra `app_estado` para que exija sesión. |
+| `supabse/supabase_migracion.sql` | Modelo normalizado avanzado (tablas + RPC). Opcional, no hace falta para que corra. |
 | `supabse/esquema.sql` | ⚠️ Versión para Postgres propio + Express. **NO lo corras en Supabase.** |
 | `out/supabase-config.js` | Tu URL y anon key. |
-| `out/supabase-bridge.js` | Inicializa el cliente y conecta `window.storage` a la tabla `app_estado`. |
+| `out/supabase-bridge.js` | Cliente Supabase + login (`window.oloAuth`) + `window.storage` sobre `app_estado`. |
+| `out/cedis-horas.jsx` | Código fuente de la app (login, roles, registro, tablero…). |
+| `out/index.html` | Carga el `.jsx`, lo transpila en el navegador con Babel y monta la app. |
 
-### Dos niveles de integración
+### Roles
 
-- **Nivel 1 — Ahora (lo que dejé listo):** el frontend guarda/lee su estado en `app_estado`. Simple, funciona sin login. Corré **`supabse/app_estado.sql`**.
-- **Nivel 2 — Después (opcional):** migrar al modelo normalizado con login por usuario, roles y RPC. Corré `supabse/supabase_migracion.sql` y reescribí la app para usar las RPC. Ver la última sección.
+| Rol | Qué ve |
+|---|---|
+| **admin** | Todo el sistema, incluido el botón de **borrar todos los registros** y todos los ajustes. |
+| **operario** | Todo **menos** el borrado masivo. En **Ajustes** solo ve **agregar colaboradores externos**. |
+
+Los correos y contraseñas los creás vos en Supabase (Authentication → Users). Cada usuario nuevo queda como **operario**; al admin lo asignás con un SQL (ver PASO 3).
 
 ---
 
-## PASO 1 · Correr el SQL en Supabase
+## PASO 1 · Correr los SQL en Supabase (en orden)
 
 1. Entrá a tu proyecto: https://supabase.com/dashboard/project/habdqtkjwprqxpofqloc
 2. Menú izquierdo → **SQL Editor** → **New query**.
-3. Abrí el archivo **`supabse/app_estado.sql`** de este repo, copiá **todo** el contenido y pegalo en el editor.
-4. Click en **Run** (o `Ctrl+Enter`).
+3. Pegá y **Run** el contenido de **`supabse/app_estado.sql`**.
+4. Nueva query. Pegá y **Run** el contenido de **`supabse/roles.sql`**.
 
-Debería terminar sin errores. Es idempotente: si lo corrés de nuevo no rompe nada.
+Ambos son idempotentes: se pueden volver a correr sin romper nada.
 
 > ❌ No corras `supabse/esquema.sql` (es para un Postgres propio con Express).
-> El `supabse/supabase_migracion.sql` es opcional por ahora (modelo con login; ver la última sección).
 
-### Qué crea `app_estado.sql`
-- Tabla `app_estado(clave, datos jsonb, actualizado)` donde vive el estado de la app.
-- Políticas RLS que permiten a la clave anon leer/escribir esa tabla (la app funciona sin login).
+Después de esto la base exige sesión: sin login no se lee ni escribe nada.
 
 ---
 
-## PASO 2 · Abrir la app
+## PASO 2 · Crear los usuarios (correo y contraseña)
 
-Abrí `out/index.html` en el navegador (o servilo con cualquier hosting estático: Vercel, Netlify, Nginx…).
+Vos creás las cuentas:
 
-Al cargar, el `supabase-bridge.js` conecta el almacenamiento de la app a la tabla `app_estado`. Abrí la consola del navegador (F12): deberías ver
+1. Dashboard → **Authentication** → **Users** → **Add user** → **Create new user**.
+2. Poné correo y contraseña. Repetí por cada persona.
+3. Cada usuario nuevo queda automáticamente con rol **operario**.
 
-```
-[supabase-bridge] Cliente Supabase listo. window.storage conectado a app_estado.
-```
-
-Registrá un turno desde la pestaña **Registrar**. Se guardará en Supabase.
+> Consejo: en Authentication → Providers → Email, dejá **Confirm email** en OFF si querés que entren sin confirmar el correo, o creá los usuarios con "Auto Confirm User".
 
 ---
 
-## PASO 3 · Verificar que quedó guardado en Supabase
+## PASO 3 · Asignar el rol admin
+
+En **SQL Editor**, cambiá el correo por el de quien será admin:
+
+```sql
+WITH u AS (SELECT id FROM public.usuarios WHERE correo = 'admin@olo.cr'),
+     r AS (SELECT id FROM public.roles WHERE clave = 'admin')
+INSERT INTO public.usuarios_roles (usuario_id, rol_id)
+SELECT u.id, r.id FROM u, r
+ON CONFLICT (usuario_id, rol_id) DO NOTHING;
+```
+
+Para ver quién tiene qué rol:
+
+```sql
+SELECT u.correo, r.clave
+FROM public.usuarios_roles ur
+JOIN public.usuarios u ON u.id = ur.usuario_id
+JOIN public.roles r    ON r.id = ur.rol_id
+ORDER BY u.correo;
+```
+
+---
+
+## PASO 4 · Abrir la app
+
+La app transpila el JSX en el navegador, así que **hay que servirla con un servidor web** (no abrir el `.html` con doble clic / `file://`).
+
+Desde la carpeta del proyecto:
+
+```bash
+npx serve out
+# o:  npx http-server out -p 3000
+```
+
+Abrí la URL que muestre (p.ej. http://localhost:3000). Vas a ver la **pantalla de login**. Entrá con uno de los correos del PASO 2.
+
+- Si entrás como **admin**: ves todo, incluido "borrar todos los registros" y todos los ajustes.
+- Si entrás como **operario**: no ves el borrado masivo, y en **Ajustes** solo ves "Colaboradores externos".
+
+La etiqueta del rol y el botón **Salir** aparecen arriba a la derecha.
+
+---
+
+## PASO 5 · Verificar que quedó guardado en Supabase
 
 En el **SQL Editor**:
 
@@ -71,7 +117,7 @@ SELECT clave, actualizado, jsonb_array_length(datos->'turnos') AS turnos
 FROM public.app_estado;
 ```
 
-Deberías ver la fila `cedis:datos:v2` con el número de turnos que registraste. Si abrís la app en otro navegador o dispositivo, verás los mismos datos.
+Deberías ver la fila `cedis:datos:v2` con los turnos registrados. Si abrís la app en otro dispositivo con otra cuenta del CEDIS, ves los mismos datos.
 
 ---
 

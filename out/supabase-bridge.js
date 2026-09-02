@@ -44,6 +44,18 @@
       var r = await client.auth.getSession();
       return r.data.session;
     },
+    // Devuelve { id, correo, nombre, activo, rol, es_admin } o null si no hay sesión.
+    async perfil() {
+      var s = await client.auth.getSession();
+      if (!s.data.session) return null;
+      var r = await client.rpc("mi_perfil");
+      if (r.error) { console.warn("[supabase-bridge] mi_perfil:", r.error.message); return null; }
+      return r.data;
+    },
+    // Notifica cambios de sesión (login / logout) a la app.
+    alCambiar(cb) {
+      return client.auth.onAuthStateChange(function (_evento, sesion) { cb(sesion); });
+    },
   };
 
   /* Atajos a las funciones RPC de la base (ver CONECTAR_SUPABASE.md, paso 3). */

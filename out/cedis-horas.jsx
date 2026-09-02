@@ -180,6 +180,18 @@ const CSS = `
 .cedis .toast .sello{flex-shrink:0;}
 @media(min-width:900px){ .cedis .toast{left:auto; right:24px; max-width:420px;} }
 .cedis .semaforo{width:10px; height:10px; border-radius:999px; display:inline-block; flex-shrink:0;}
+
+/* ── login ── */
+.cedis .login-fondo{min-height:100vh; display:flex; align-items:center; justify-content:center; padding:24px; background:var(--concreto);}
+.cedis .login-caja{background:#fff; border-radius:var(--radio); box-shadow:var(--sombra); width:100%; max-width:380px; overflow:hidden; border-top:4px solid var(--senal);}
+.cedis .login-cab{padding:26px 26px 6px; text-align:center;}
+.cedis .login-cab img{height:38px; margin-bottom:14px;}
+.cedis .login-cue{padding:10px 26px 26px;}
+.cedis .login-err{margin-top:4px; margin-bottom:12px;}
+/* etiqueta de rol en la barra superior */
+.cedis .usuario-caja{display:flex; align-items:center; gap:10px;}
+.cedis .rol-pill{font-family:var(--dis); text-transform:uppercase; letter-spacing:.08em; font-size:9.5px; font-weight:600; padding:4px 9px; border-radius:999px; background:var(--acero-3); color:var(--senal-oscuro); border:1px solid var(--acero-2);}
+.cedis .rol-pill.admin{background:var(--acero); color:#fff; border-color:var(--acero);}
 `;
 
 /* ════════════════════════════════════════════════════════
@@ -1130,13 +1142,32 @@ function ListaEditable({ titulo, items, onAdd, onDel, placeholder }) {
   );
 }
 
-function Ajustes({ datos, setDatos, avisar }) {
+function Ajustes({ datos, setDatos, avisar, esAdmin = true }) {
   const up = (p) => setDatos(d => ({ ...d, ...p }));
   const [confirmar, setConfirmar] = useState(false);
   const mesesPres = useMemo(() => {
     const s = new Set([...Object.keys(datos.presupuestos), ...datos.turnos.map(t => claveMes(t.fecha))]);
     return [...s].sort().reverse();
   }, [datos]);
+
+  /* El operario solo puede administrar colaboradores externos. */
+  if (!esAdmin) {
+    return (
+      <div className="marco">
+        <div className="placa">
+          <div className="placa-cab"><h2>Colaboradores externos</h2></div>
+          <div className="placa-cue">
+            <ListaEditable titulo="Colaboradores externos" items={datos.colaboradores} placeholder="Nombre y apellidos"
+              onAdd={v => up({ colaboradores: [...new Set([...datos.colaboradores, v])] })}
+              onDel={v => up({ colaboradores: datos.colaboradores.filter(x => x !== v) })} />
+            <p className="kpi-s" style={{ marginTop: 12 }}>
+              Como operario podés dar de alta y quitar colaboradores externos. El resto de los ajustes los administra un usuario admin.
+            </p>
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="marco">
@@ -1233,7 +1264,62 @@ function Ajustes({ datos, setDatos, avisar }) {
 }
 
 /* ════════════════════════════════════════════════════════
-   9. APLICACIÓN
+   9. LOGIN (autenticación de Supabase)
+   ════════════════════════════════════════════════════════ */
+
+function Login({ onEntrar }) {
+  const [correo, setCorreo] = useState("");
+  const [clave, setClave] = useState("");
+  const [error, setError] = useState("");
+  const [enviando, setEnviando] = useState(false);
+
+  const entrar = async (e) => {
+    e.preventDefault();
+    setError("");
+    if (!window.oloAuth) { setError("No se cargó la conexión con Supabase."); return; }
+    setEnviando(true);
+    try {
+      await window.oloAuth.entrar(correo.trim(), clave);
+      onEntrar();
+    } catch (err) {
+      const m = (err && err.message) || "";
+      setError(/invalid login/i.test(m) ? "Correo o contraseña incorrectos." : (m || "No se pudo iniciar sesión."));
+    } finally {
+      setEnviando(false);
+    }
+  };
+
+  return (
+    <div className="cedis"><style>{CSS}</style>
+      <div className="login-fondo">
+        <form className="login-caja" onSubmit={entrar}>
+          <div className="login-cab">
+            {MARCA.logo && <img src={MARCA.logo} alt="OLO" />}
+            <h1>Horas de personal externo</h1>
+            <p className="kpi-s" style={{ marginTop: 6 }}>Ingresá con tu cuenta del CEDIS</p>
+          </div>
+          <div className="login-cue">
+            <label className="campo"><span>Correo</span>
+              <input type="email" autoComplete="username" value={correo} required
+                onChange={e => setCorreo(e.target.value)} placeholder="vos@olo.cr" />
+            </label>
+            <label className="campo"><span>Contraseña</span>
+              <input type="password" autoComplete="current-password" value={clave} required
+                onChange={e => setClave(e.target.value)} placeholder="••••••••" />
+            </label>
+            {error && <div className="aviso rojo login-err">{error}</div>}
+            <button className="btn btn-senal" type="submit" disabled={enviando} style={{ width: "100%" }}>
+              {enviando ? "Ingresando…" : "Ingresar"}
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
+  );
+}
+
+/* ════════════════════════════════════════════════════════
+   10. APLICACIÓN
    ════════════════════════════════════════════════════════ */
 
 const PESTANAS = [
@@ -1251,13 +1337,41 @@ export default function App() {
   const [toast, setToast] = useState(null);
   const primera = useRef(true);
 
+  /* — sesión y rol — */
+  const [sesion, setSesion] = useState(undefined);   // undefined = verificando; null = sin sesión
+  const [perfil, setPerfil] = useState(null);        // { correo, nombre, rol, es_admin }
+  const esAdmin = !!(perfil && perfil.es_admin);
+
+  const cargarPerfil = async () => {
+    if (!window.oloAuth) { setSesion(null); return; }
+    const s = await window.oloAuth.sesion();
+    setSesion(s || null);
+    setPerfil(s ? await window.oloAuth.perfil() : null);
+  };
+
+  // Verifica sesión al arrancar y escucha cambios (login/logout).
   useEffect(() => {
+    cargarPerfil();
+    const sub = window.oloAuth ? window.oloAuth.alCambiar(() => cargarPerfil()) : null;
+    return () => { try { sub && sub.data && sub.data.subscription.unsubscribe(); } catch {} };
+  }, []);
+
+  const salir = async () => {
+    if (window.oloAuth) await window.oloAuth.salir();
+    setPerfil(null); setSesion(null);
+  };
+
+  // Carga los datos solo cuando hay sesión válida.
+  useEffect(() => {
+    if (!sesion) return;
+    let vivo = true;
     (async () => {
       const g = await almacen.leer(K_DATOS);
-      if (g) setDatos({ ...BASE, ...g });
-      setCargando(false);
+      if (vivo && g) setDatos({ ...BASE, ...g });
+      if (vivo) setCargando(false);
     })();
-  }, []);
+    return () => { vivo = false; };
+  }, [sesion]);
 
   useEffect(() => {
     if (cargando) return;
@@ -1278,6 +1392,16 @@ export default function App() {
 
   const cicloHoy = ciclo(new Date(), 0);
   const turnosCiclo = datos.turnos.filter(t => enRango(t.fecha, cicloHoy));
+
+  // Verificando sesión
+  if (sesion === undefined) return (
+    <div className="cedis"><style>{CSS}</style>
+      <div className="marco" style={{ paddingTop: 60 }}><div className="vacio"><p>Verificando sesión…</p></div></div>
+    </div>
+  );
+
+  // Sin sesión → pantalla de login
+  if (!sesion) return <Login onEntrar={cargarPerfil} />;
 
   if (cargando) return (
     <div className="cedis"><style>{CSS}</style>
@@ -1305,6 +1429,14 @@ export default function App() {
             <div className="rot">Tarifa vigente</div>
             <div className="num" style={{ fontSize: 15, fontWeight: 600, marginTop: 3 }}>₡{miles(datos.tarifa)} / h</div>
           </div>
+          <span className="divisor" aria-hidden="true" />
+          <div className="usuario-caja">
+            <div style={{ textAlign: "right" }}>
+              <div className="num" style={{ fontSize: 13, fontWeight: 600 }}>{perfil ? (perfil.nombre || perfil.correo) : ""}</div>
+              <span className={"rol-pill" + (esAdmin ? " admin" : "")}>{esAdmin ? "Admin" : "Operario"}</span>
+            </div>
+            <button className="btn btn-2 btn-s" onClick={salir} title="Cerrar sesión">Salir</button>
+          </div>
         </div>
       </header>
 
@@ -1315,15 +1447,15 @@ export default function App() {
       {vacio && tab !== "ajustes" && (
         <div className="marco"><div className="placa"><div className="vacio">
           <h2 style={{ marginBottom: 10 }}>Sin registros todavía</h2>
-          <p>Registrá el primer turno en esta pestaña, o cargá nueve ciclos de datos de ejemplo para ver cómo se comportan la auditoría semanal y la proyección.</p>
-          <button className="btn btn-senal btn-s" onClick={() => { setDatos(datosEjemplo()); avisar("Datos de ejemplo cargados"); }}>Cargar datos de ejemplo</button>
+          <p>Registrá el primer turno en esta pestaña{esAdmin ? ", o cargá nueve ciclos de datos de ejemplo para ver cómo se comportan la auditoría semanal y la proyección." : "."}</p>
+          {esAdmin && <button className="btn btn-senal btn-s" onClick={() => { setDatos(datosEjemplo()); avisar("Datos de ejemplo cargados"); }}>Cargar datos de ejemplo</button>}
         </div></div></div>
       )}
 
       {tab === "registro" && <div className="marco"><Registro datos={datos} guardar={guardarTurno} borrar={borrarTurno} avisar={avisar} /></div>}
       {tab === "semana"   && <Semana datos={datos} offset={offset} setOffset={setOffset} />}
       {tab === "tablero"  && <Tablero datos={datos} setPresupuesto={setPresupuesto} />}
-      {tab === "ajustes"  && <Ajustes datos={datos} setDatos={setDatos} avisar={avisar} />}
+      {tab === "ajustes"  && <Ajustes datos={datos} setDatos={setDatos} avisar={avisar} esAdmin={esAdmin} />}
 
       {toast && <div className="toast"><span className="sello">OK</span>{toast}</div>}
 
