@@ -11,7 +11,7 @@
 --              agregar colaboradores externos.
 --
 -- CÓMO CORRERLO
---   Supabase Studio → SQL Editor → New query → pegar todo → Run
+--   Supabaase Studio → SQL Editor → New query → pegar todo → Run
 --   Idempotente: se puede volver a correr sin romper nada.
 -- ═══════════════════════════════════════════════════════════════════════
 
