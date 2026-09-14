@@ -241,7 +241,49 @@ function horasTurno(entrada, salida, descansoMin = 0, bloqueMin = 1) {
   if (bloqueMin > 1) min = Math.round(min / bloqueMin) * bloqueMin;
   return Math.round((min / 60) * 100) / 100;
 }
-const costoTurno = (horas, tarifa = TARIFA_DEFECTO) => Math.round(horas * tarifa);
+/* ── Horas extra ──
+   Reglas de negocio (configurables en Ajustes):
+   - Hasta UMBRAL_EXTRA_DEFECTO horas laboradas en un turno se pagan a tarifa normal.
+   - Cada hora que supere ese umbral (la hora 10 en adelante con umbral 9) es extra
+     y se paga a tarifa × FACTOR_EXTRA_DEFECTO (1.5 por defecto).
+   El umbral aplica POR TURNO (por persona por jornada), no sobre acumulados. */
+const UMBRAL_EXTRA_DEFECTO = 9;    // horas normales antes de que empiece la hora extra
+const FACTOR_EXTRA_DEFECTO = 1.5;  // recargo de la hora extra
+
+/** Separa las horas de un turno en normales y extra según el umbral. */
+function desgloseHoras(horasTot, umbral = UMBRAL_EXTRA_DEFECTO) {
+  const h = Math.max(0, horasTot || 0);
+  const u = umbral > 0 ? umbral : Infinity;
+  const normales = Math.min(h, u);
+  const extra = Math.max(0, h - u);
+  return { normales: Math.round(normales * 100) / 100, extra: Math.round(extra * 100) / 100 };
+}
+
+/**
+ * Costo de UN turno con horas extra. Las primeras `umbral` horas van a tarifa;
+ * el excedente a tarifa × factor. Devuelve colones enteros.
+ */
+function costoTurno(horas, tarifa = TARIFA_DEFECTO, umbral = UMBRAL_EXTRA_DEFECTO, factor = FACTOR_EXTRA_DEFECTO) {
+  const { normales, extra } = desgloseHoras(horas, umbral);
+  return Math.round((normales + extra * factor) * tarifa);
+}
+
+/** Costo de un turno a partir de sus campos (entrada/salida/descanso). */
+function costoDeTurno(t, tarifa, bloqueMin = 1, umbral = UMBRAL_EXTRA_DEFECTO, factor = FACTOR_EXTRA_DEFECTO) {
+  const h = horasTurno(t.entrada, t.salida, t.descansoMin || 0, bloqueMin);
+  return costoTurno(h, tarifa, umbral, factor);
+}
+
+/** Suma el costo (con horas extra por turno) de una lista de turnos. */
+function costoTurnos(turnos, tarifa, bloqueMin = 1, umbral = UMBRAL_EXTRA_DEFECTO, factor = FACTOR_EXTRA_DEFECTO) {
+  return turnos.reduce((s, t) => s + costoDeTurno(t, tarifa, bloqueMin, umbral, factor), 0);
+}
+
+/** Total de horas extra (para KPIs) de una lista de turnos. */
+function horasExtraTurnos(turnos, bloqueMin = 1, umbral = UMBRAL_EXTRA_DEFECTO) {
+  return Math.round(turnos.reduce((s, t) =>
+    s + desgloseHoras(horasTurno(t.entrada, t.salida, t.descansoMin || 0, bloqueMin), umbral).extra, 0) * 100) / 100;
+}
 
 /**
  * Reparte las horas de un turno entre sus embarques.
@@ -269,18 +311,25 @@ function horasPorEmbarque(turno, bloqueMin = 1) {
 
 /**
  * Agrega el costo por código de embarque a través de MUCHOS turnos y colaboradores.
- * Suma las horas efectivas de cada embarque (ver horasPorEmbarque) y las multiplica
- * por la tarifa. Devuelve filas ordenadas por costo descendente.
+ * El costo de cada turno (con horas extra, calculadas a nivel de turno) se reparte
+ * entre sus embarques en proporción a las horas de cada uno. Así, si un turno tuvo
+ * hora extra, ese recargo se prorratea entre los embarques que atendió.
+ * Devuelve filas ordenadas por costo descendente.
  */
-function costoPorEmbarque(turnos, tarifa, bloqueMin = 1) {
+function costoPorEmbarque(turnos, tarifa, bloqueMin = 1, umbral = UMBRAL_EXTRA_DEFECTO, factor = FACTOR_EXTRA_DEFECTO) {
   const m = new Map();
   turnos.forEach(t => {
-    horasPorEmbarque(t, bloqueMin).forEach(({ codigo, horas }) => {
+    const reparto = horasPorEmbarque(t, bloqueMin);
+    const totH = reparto.reduce((s, e) => s + e.horas, 0);
+    const costoT = costoDeTurno(t, tarifa, bloqueMin, umbral, factor);   // costo del turno con extra
+    reparto.forEach(({ codigo, horas }) => {
+      const costo = totH > 0 ? (costoT * horas) / totH : 0;   // prorrateo por horas
       const a = m.get(codigo) || {
-        codigo, horas: 0, turnos: 0, clientes: new Set(), colaboradores: new Set(),
+        codigo, horas: 0, costo: 0, turnos: 0, clientes: new Set(), colaboradores: new Set(),
         primera: t.fecha, ultima: t.fecha,
       };
       a.horas += horas;
+      a.costo += costo;
       a.turnos += 1;
       if (t.cliente) a.clientes.add(t.cliente);
       if (t.colaborador) a.colaboradores.add(t.colaborador);
@@ -293,7 +342,7 @@ function costoPorEmbarque(turnos, tarifa, bloqueMin = 1) {
     .map(x => ({
       codigo: x.codigo,
       horas: Math.round(x.horas * 100) / 100,
-      costo: Math.round(x.horas * tarifa),
+      costo: Math.round(x.costo),
       turnos: x.turnos,
       personas: x.colaboradores.size,
       clientes: [...x.clientes].sort(),
@@ -447,6 +496,8 @@ const almacen = {
 const BASE = {
   tarifa: TARIFA_DEFECTO,
   bloqueMin: 15,
+  umbralExtra: UMBRAL_EXTRA_DEFECTO,   // horas normales antes de la hora extra
+  factorExtra: FACTOR_EXTRA_DEFECTO,   // recargo de la hora extra (1.5 = +50 %)
   departamentos: ["Recepción", "Valor agregado", "Crossdock", "Pesado", "Alisto", "Despacho", "Zona Franca", "El Coco"],
   clientes: ["EPA", "Cofersa", "Zona Franca", "OLO"],
   colaboradores: [],
@@ -538,7 +589,7 @@ function Desglose({ filas, total, unidad = "crc" }) {
 }
 
 /* ── ELEMENTO FIRMA: la cinta del ciclo Viernes → Jueves ── */
-function CintaCiclo({ turnos, rango, tarifa, titulo, derecha }) {
+function CintaCiclo({ turnos, rango, tarifa, titulo, derecha, umbral = UMBRAL_EXTRA_DEFECTO, factor = FACTOR_EXTRA_DEFECTO }) {
   const dias = useMemo(() => {
     const ini = aFecha(rango.inicio);
     return Array.from({ length: 7 }, (_, i) => {
@@ -550,6 +601,7 @@ function CintaCiclo({ turnos, rango, tarifa, titulo, derecha }) {
   }, [turnos, rango]);
   const max = Math.max(...dias.map(d => d.h), 1);
   const totH = dias.reduce((s,d) => s + d.h, 0);
+  const totCosto = costoTurnos(turnos, tarifa, 1, umbral, factor);
   const hoy = hoyISO();
   return (
     <div className="cinta">
@@ -565,7 +617,7 @@ function CintaCiclo({ turnos, rango, tarifa, titulo, derecha }) {
             {derecha || (<>
               <div className="rot">Acumulado</div>
               <div className="num" style={{ fontSize: 15, fontWeight: 600, marginTop: 3 }}>
-                {hh(totH)} h · {crc(totH * tarifa)}
+                {hh(totH)} h · {crc(totCosto)}
               </div>
             </>)}
           </div>
@@ -677,8 +729,14 @@ function Registro({ datos, guardar, borrar, avisar }) {
   const [nuevoCliente, setNuevoCliente] = useState(false);
   const set = (k, v) => setF(p => ({ ...p, [k]: v }));
 
+  const UM = datos.umbralExtra ?? UMBRAL_EXTRA_DEFECTO;
+  const FX = datos.factorExtra ?? FACTOR_EXTRA_DEFECTO;
+
   const horas = horasTurno(f.entrada, f.salida, Number(f.descansoMin) || 0, datos.bloqueMin);
-  const costo = costoTurno(horas, datos.tarifa);
+  const { normales: horasNormales, extra: horasExtra } = desgloseHoras(horas, UM);
+  const costoNormal = Math.round(horasNormales * datos.tarifa);
+  const costoExtra = Math.round(horasExtra * datos.tarifa * FX);
+  const costo = costoNormal + costoExtra;
   const embValidos = f.embarques.filter(e => e.codigo.trim());
   const horasAsignadas = embValidos.reduce((s,e) => s + (Number(e.horas) || 0), 0);
   const descuadre = horasAsignadas > 0 && Math.abs(horasAsignadas - horas) > 0.02;
@@ -689,6 +747,7 @@ function Registro({ datos, guardar, borrar, avisar }) {
     [datos.turnos, f.fecha]
   );
   const totDia = delDia.reduce((s,t) => s + horasTurno(t.entrada, t.salida, t.descansoMin), 0);
+  const totDiaCosto = costoTurnos(delDia, datos.tarifa, datos.bloqueMin, UM, FX);
 
   const listo = f.departamento && f.colaborador.trim() && f.cliente && f.entrada && f.salida && horas > 0;
 
@@ -806,11 +865,22 @@ function Registro({ datos, guardar, borrar, avisar }) {
           </label>
 
           {/* — cálculo en vivo — */}
-          <div className="rejilla g3" style={{ marginBottom: 14 }}>
-            <Kpi rot="Horas del turno" valor={hh(horas)} sub={`Bloques de ${datos.bloqueMin} min`} />
-            <Kpi rot={`Tarifa · ₡${miles(datos.tarifa)}/h`} valor={crc(costo)} sub="Costo operativo del día" />
+          <div className="rejilla g4" style={{ marginBottom: 14 }}>
+            <Kpi rot="Horas del turno" valor={hh(horas)}
+              sub={horasExtra > 0 ? `${hh(horasNormales)} normales + ${hh(horasExtra)} extra` : `Bloques de ${datos.bloqueMin} min`} />
+            <Kpi rot="Horas extra" valor={hh(horasExtra)}
+              sub={horasExtra > 0 ? `sobre ${UM} h · ×${String(FX).replace(".",",")}` : `sobre ${UM} h por turno`}
+              color={horasExtra > 0 ? "var(--alerta)" : undefined} />
+            <Kpi rot={`Costo · ₡${miles(datos.tarifa)}/h`} valor={crc(costo)}
+              sub={horasExtra > 0 ? `${crc(costoNormal)} + ${crc(costoExtra)} extra` : "Costo operativo del turno"} />
             <Kpi rot="Embarques" valor={String(embValidos.length)} sub={embValidos.length ? embValidos.map(e => e.codigo).join(" · ") : "Sin detalle"} />
           </div>
+          {horasExtra > 0 && (
+            <div className="aviso" style={{ marginBottom: 14 }}>
+              Este turno supera las {UM} h: {hh(horasExtra)} h se pagan como extra a ₡{miles(Math.round(datos.tarifa * FX))}/h
+              (tarifa ×{String(FX).replace(".",",")}), {crc(costoExtra)} de recargo.
+            </div>
+          )}
 
           <button className="btn btn-senal" onClick={enviar} disabled={!listo} style={{ width: "100%" }}>
             {f.id ? "Guardar cambios" : "Registrar turno"}
@@ -826,7 +896,7 @@ function Registro({ datos, guardar, borrar, avisar }) {
       <div className="placa">
         <div className="placa-cab">
           <h2>Registrado el {fmtLargo(f.fecha)}</h2>
-          <span className="num" style={{ fontSize: 13 }}>{delDia.length} turnos · {hh(totDia)} h · {crc(totDia * datos.tarifa)}</span>
+          <span className="num" style={{ fontSize: 13 }}>{delDia.length} turnos · {hh(totDia)} h · {crc(totDiaCosto)}</span>
         </div>
         {delDia.length === 0 ? (
           <div className="vacio"><p>Todavía no hay turnos para esta fecha. El primero que registrés aparece acá.</p></div>
@@ -840,12 +910,14 @@ function Registro({ datos, guardar, borrar, avisar }) {
               <tbody>
                 {delDia.map(t => {
                   const h = horasTurno(t.entrada, t.salida, t.descansoMin);
+                  const ext = desgloseHoras(h, UM).extra;
                   return (
                     <tr key={t.id}>
                       <td style={{ fontWeight: 600 }}>{t.colaborador}</td>
                       <td>{t.departamento}</td><td>{t.cliente}</td>
                       <td className="n">{t.entrada}</td><td className="n">{t.salida}</td>
-                      <td className="n">{hh(h)}</td><td className="n">{crc(h * datos.tarifa)}</td>
+                      <td className="n">{hh(h)}{ext > 0 && <span className="marca" style={{ marginLeft: 6, color: "var(--alerta)", borderColor: "var(--alerta)" }}>+{hh(ext)} ex</span>}</td>
+                      <td className="n">{crc(costoTurno(h, datos.tarifa, UM, FX))}</td>
                       <td><div style={{ display:"flex", gap:4, flexWrap:"wrap" }}>
                         {t.embarques.map(e => <span className="marca" key={e.id}>{e.codigo}{e.horas ? ` · ${hh(e.horas)}h` : ""}</span>)}
                       </div></td>
@@ -869,13 +941,14 @@ function Registro({ datos, guardar, borrar, avisar }) {
    6. PANTALLA · AUDITORÍA SEMANAL (VIE → JUE)
    ════════════════════════════════════════════════════════ */
 
-function agrupar(turnos, clave, tarifa) {
+function agrupar(turnos, clave, tarifa, umbral = UMBRAL_EXTRA_DEFECTO, factor = FACTOR_EXTRA_DEFECTO) {
   const m = new Map();
   turnos.forEach(t => {
     const h = horasTurno(t.entrada, t.salida, t.descansoMin);
+    const { extra } = desgloseHoras(h, umbral);
     const k = t[clave] || "—";
-    const a = m.get(k) || { nombre: k, horas: 0, costo: 0, turnos: 0 };
-    a.horas += h; a.costo += h * tarifa; a.turnos++;
+    const a = m.get(k) || { nombre: k, horas: 0, extra: 0, costo: 0, turnos: 0 };
+    a.horas += h; a.extra += extra; a.costo += costoTurno(h, tarifa, umbral, factor); a.turnos++;
     m.set(k, a);
   });
   return [...m.values()].sort((a,b) => b.costo - a.costo);
@@ -883,6 +956,8 @@ function agrupar(turnos, clave, tarifa) {
 
 function Semana({ datos, offset, setOffset }) {
   const T = datos.tarifa;
+  const UM = datos.umbralExtra ?? UMBRAL_EXTRA_DEFECTO;
+  const FX = datos.factorExtra ?? FACTOR_EXTRA_DEFECTO;
 
   // Modo de período: "ciclo" (viernes→jueves) o "rango" (fechas libres).
   const [modo, setModo] = useState("ciclo");
@@ -907,14 +982,15 @@ function Semana({ datos, offset, setOffset }) {
 
   const suma = (ts) => ts.reduce((s,t) => s + horasTurno(t.entrada, t.salida, t.descansoMin), 0);
   const horas = suma(enCiclo), horasPrev = suma(enPrevio);
-  const costo = horas * T;
+  const costo = costoTurnos(enCiclo, T, datos.bloqueMin, UM, FX);
+  const horasExtra = horasExtraTurnos(enCiclo, datos.bloqueMin, UM);
   const personas = new Set(enCiclo.map(t => t.colaborador)).size;
   const embarques = enCiclo.reduce((s,t) => s + t.embarques.length, 0);
   const delta = horasPrev > 0 ? (horas - horasPrev) / horasPrev : 0;
 
-  const porCliente = agrupar(enCiclo, "cliente", T);
-  const porDepto   = agrupar(enCiclo, "departamento", T);
-  const porPersona = agrupar(enCiclo, "colaborador", T);
+  const porCliente = agrupar(enCiclo, "cliente", T, UM, FX);
+  const porDepto   = agrupar(enCiclo, "departamento", T, UM, FX);
+  const porPersona = agrupar(enCiclo, "colaborador", T, UM, FX);
 
   // Si el ciclo mostrado está vacío, buscá el ciclo más reciente que sí tenga turnos.
   const cicloConDatos = useMemo(() => {
@@ -927,22 +1003,26 @@ function Semana({ datos, offset, setOffset }) {
   }, [enCiclo.length, datos.turnos]);
 
   const exportar = () => {
-    const filas = [["Fecha","Departamento","Colaborador","Cliente","Entrada","Salida","Descanso (min)","Horas","Tarifa CRC","Costo CRC","Embarques","Observaciones"]];
+    const filas = [["Fecha","Departamento","Colaborador","Cliente","Entrada","Salida","Descanso (min)","Horas","Horas normales","Horas extra","Tarifa CRC","Costo normal CRC","Costo extra CRC","Costo total CRC","Embarques","Observaciones"]];
     enCiclo.slice().sort((a,b) => a.fecha.localeCompare(b.fecha)).forEach(t => {
       const h = horasTurno(t.entrada, t.salida, t.descansoMin);
+      const { normales, extra } = desgloseHoras(h, UM);
+      const costoNorm = Math.round(normales * T);
+      const costoExt = Math.round(extra * T * FX);
       filas.push([fmtLargo(t.fecha), t.departamento, t.colaborador, t.cliente, t.entrada, t.salida,
-        t.descansoMin || 0, hh(h), T, Math.round(h*T),
+        t.descansoMin || 0, hh(h), hh(normales), hh(extra), T, costoNorm, costoExt, costoNorm + costoExt,
         t.embarques.map(e => e.codigo + (e.horas ? `(${hh(e.horas)}h)` : "")).join(" | "), t.nota || ""]);
     });
     filas.push([]);
-    filas.push([modo === "ciclo" ? "TOTAL CICLO" : "TOTAL RANGO", `${fmtLargo(rango.inicio)} a ${fmtLargo(rango.fin)}`, "", "", "", "", "", hh(horas), T, Math.round(costo)]);
+    filas.push([modo === "ciclo" ? "TOTAL CICLO" : "TOTAL RANGO", `${fmtLargo(rango.inicio)} a ${fmtLargo(rango.fin)}`, "", "", "", "", "",
+      hh(horas), hh(horas - horasExtra), hh(horasExtra), T, "", "", Math.round(costo)]);
     descargarCSV(`${modo === "ciclo" ? "auditoria" : "reporte_rango"}_${rango.inicio}_${rango.fin}.csv`, filas);
   };
 
   return (
     <>
       {modo === "ciclo" ? (
-        <CintaCiclo turnos={enCiclo} rango={rango} tarifa={T}
+        <CintaCiclo turnos={enCiclo} rango={rango} tarifa={T} umbral={UM} factor={FX}
           titulo={offset === -1 ? "Ciclo a auditar · recién cerrado" : offset === 0 ? "Ciclo en curso" : "Ciclo histórico"}
           derecha={<PasoCiclo offset={offset} setOffset={setOffset} />} />
       ) : (
@@ -982,9 +1062,11 @@ function Semana({ datos, offset, setOffset }) {
         </div>
 
         <div className="rejilla g4" style={{ marginTop: 14 }}>
-          <Kpi rot="Horas del ciclo" valor={hh(horas)} sub={`${enCiclo.length} turnos registrados`} />
-          <Kpi rot="Costo del ciclo" valor={crc(costo)} sub={`Tarifa ₡${miles(T)}/h`} />
-          <Kpi rot="Personal externo" valor={String(personas)} sub={`${embarques} embarques atendidos`} />
+          <Kpi rot="Horas del ciclo" valor={hh(horas)} sub={`${enCiclo.length} turnos · ${hh(horasExtra)} h extra`} />
+          <Kpi rot="Costo del ciclo" valor={crc(costo)} sub={`Tarifa ₡${miles(T)}/h · extra ×${String(FX).replace(".",",")}`} />
+          <Kpi rot="Horas extra" valor={hh(horasExtra)}
+            sub={horasExtra > 0 ? `${crc(Math.round(horasExtra * T * FX))} en recargo` : `sobre ${UM} h por turno`}
+            color={horasExtra > 0 ? "var(--alerta)" : undefined} />
           <Kpi rot={modo === "ciclo" ? "Contra ciclo anterior" : "Contra período anterior"} valor={(delta >= 0 ? "+" : "") + pct(delta)}
             sub={`${hh(horasPrev)} h el período previo`}
             color={delta > 0.1 ? "var(--alerta)" : delta < -0.05 ? "var(--ok)" : undefined} />
@@ -1098,7 +1180,7 @@ function TablaReporte({ titulo, etiqueta, filas, totalCosto, onExcel }) {
           <table>
             <thead><tr>
               <th>{etiqueta}</th><th className="n">Turnos</th><th className="n">Personas</th>
-              <th className="n">Horas</th><th className="n">Costo</th><th className="n">%</th>
+              <th className="n">Horas</th><th className="n">Extra</th><th className="n">Costo</th><th className="n">%</th>
             </tr></thead>
             <tbody>
               {filas.map(r => (
@@ -1109,6 +1191,7 @@ function TablaReporte({ titulo, etiqueta, filas, totalCosto, onExcel }) {
                   <td className="n">{r.turnos}</td>
                   <td className="n">{r.personas}</td>
                   <td className="n">{hh(r.horas)}</td>
+                  <td className="n" style={{ color: r.extra > 0 ? "var(--alerta)" : "var(--tinta-3)" }}>{r.extra > 0 ? hh(r.extra) : "—"}</td>
                   <td className="n" style={{ fontWeight: 600 }}>{crc(r.costo)}</td>
                   <td className="n" style={{ color: "var(--tinta-2)" }}>{pct(r.costo / (totalCosto || 1))}</td>
                 </tr>
@@ -1118,6 +1201,7 @@ function TablaReporte({ titulo, etiqueta, filas, totalCosto, onExcel }) {
                 <td className="n">{filas.reduce((s,r)=>s+r.turnos,0)}</td>
                 <td className="n"></td>
                 <td className="n">{hh(filas.reduce((s,r)=>s+r.horas,0))}</td>
+                <td className="n">{hh(filas.reduce((s,r)=>s+(r.extra||0),0))}</td>
                 <td className="n">{crc(totalCosto)}</td>
                 <td className="n">100%</td>
               </tr>
@@ -1131,6 +1215,8 @@ function TablaReporte({ titulo, etiqueta, filas, totalCosto, onExcel }) {
 
 function Tablero({ datos, setPresupuesto }) {
   const T = datos.tarifa;
+  const UM = datos.umbralExtra ?? UMBRAL_EXTRA_DEFECTO;
+  const FX = datos.factorExtra ?? FACTOR_EXTRA_DEFECTO;
   const [semanasBase, setSemanasBase] = useState(8);   // ventana de análisis (4–8)
   const [horizonte, setHorizonte] = useState(4);
 
@@ -1153,11 +1239,12 @@ function Tablero({ datos, setPresupuesto }) {
       const c = ciclo(new Date(), -i);
       const ts = turnos.filter(t => enRango(t.fecha, c));
       const h = ts.reduce((s,t) => s + horasTurno(t.entrada, t.salida, t.descansoMin), 0);
-      out.push({ etiqueta: c.etiqueta, inicio: c.inicio, horas: Math.round(h*100)/100, costo: Math.round(h*T),
+      out.push({ etiqueta: c.etiqueta, inicio: c.inicio, horas: Math.round(h*100)/100,
+                 costo: costoTurnos(ts, T, datos.bloqueMin, UM, FX),
                  personas: new Set(ts.map(t => t.colaborador)).size });
     }
     return out;
-  }, [turnos, T]);
+  }, [turnos, T, UM, FX]);
 
   const conDatos = serie.filter(s => s.horas > 0);
   const ventana = conDatos.slice(-semanasBase);
@@ -1183,19 +1270,19 @@ function Tablero({ datos, setPresupuesto }) {
     turnos.forEach(t => {
       const k = claveMes(t.fecha);
       const h = horasTurno(t.entrada, t.salida, t.descansoMin);
-      const a = m.get(k) || { k, horas: 0 };
-      a.horas += h; m.set(k, a);
+      const a = m.get(k) || { k, horas: 0, costo: 0 };
+      a.horas += h; a.costo += costoDeTurno(t, T, datos.bloqueMin, UM, FX); m.set(k, a);
     });
     return [...m.values()].sort((a,b) => a.k.localeCompare(b.k)).slice(-12)
-      .map(x => ({ ...x, horas: Math.round(x.horas*100)/100, costo: Math.round(x.horas*T),
+      .map(x => ({ ...x, horas: Math.round(x.horas*100)/100, costo: Math.round(x.costo),
                    etiqueta: nombreMes(x.k), presupuesto: datos.presupuestos[x.k] || 0 }));
-  }, [turnos, datos.presupuestos, T]);
+  }, [turnos, datos.presupuestos, T, UM, FX]);
 
   /* — presupuesto del mes seleccionado — */
   const [mesSel, setMesSel] = useState(claveMes(hoyISO()));
   const presupuesto = datos.presupuestos[mesSel] || 0;
-  const gastoMes = useMemo(() => turnos.filter(t => claveMes(t.fecha) === mesSel)
-    .reduce((s,t) => s + horasTurno(t.entrada, t.salida, t.descansoMin), 0) * T, [turnos, mesSel, T]);
+  const gastoMes = useMemo(() => costoTurnos(turnos.filter(t => claveMes(t.fecha) === mesSel), T, datos.bloqueMin, UM, FX),
+    [turnos, mesSel, T, UM, FX]);
   const esMesActual = mesSel === claveMes(hoyISO());
   const ej = ejecucion(gastoMes, presupuesto, esMesActual ? new Date() : new Date(Number(mesSel.slice(0,4)), Number(mesSel.slice(5,7)), 0));
   const opcionesMes = useMemo(() => {
@@ -1203,8 +1290,9 @@ function Tablero({ datos, setPresupuesto }) {
     return [...s].sort().reverse();
   }, [datos.presupuestos, datos.turnos]);
 
-  const anioHoras = turnos.filter(t => t.fecha.startsWith(hoyISO().slice(0,4)))
-    .reduce((s,t) => s + horasTurno(t.entrada, t.salida, t.descansoMin), 0);
+  const turnosAnio = turnos.filter(t => t.fecha.startsWith(hoyISO().slice(0,4)));
+  const anioHoras = turnosAnio.reduce((s,t) => s + horasTurno(t.entrada, t.salida, t.descansoMin), 0);
+  const anioCosto = costoTurnos(turnosAnio, T, datos.bloqueMin, UM, FX);
 
   /* — reportes agregados (respetan los filtros) — */
   const agrupar = (campo) => {
@@ -1212,34 +1300,38 @@ function Tablero({ datos, setPresupuesto }) {
     turnos.forEach(t => {
       const clave = t[campo] || "(sin dato)";
       const h = horasTurno(t.entrada, t.salida, t.descansoMin);
-      const a = m.get(clave) || { nombre: clave, turnos: 0, horas: 0, personas: new Set() };
-      a.turnos += 1; a.horas += h; a.personas.add(t.colaborador);
+      const { extra } = desgloseHoras(h, UM);
+      const a = m.get(clave) || { nombre: clave, turnos: 0, horas: 0, extra: 0, costo: 0, personas: new Set() };
+      a.turnos += 1; a.horas += h; a.extra += extra;
+      a.costo += costoTurno(h, T, UM, FX); a.personas.add(t.colaborador);
       m.set(clave, a);
     });
     return [...m.values()]
       .map(x => ({ nombre: x.nombre, turnos: x.turnos, horas: Math.round(x.horas*100)/100,
-                   personas: x.personas.size, costo: Math.round(x.horas*T) }))
+                   extra: Math.round(x.extra*100)/100, personas: x.personas.size, costo: Math.round(x.costo) }))
       .sort((a,b) => b.costo - a.costo);
   };
-  const repCliente = useMemo(() => agrupar("cliente"), [turnos, T]);
-  const repDepto = useMemo(() => agrupar("departamento"), [turnos, T]);
-  const repColaborador = useMemo(() => agrupar("colaborador"), [turnos, T]);
+  const repCliente = useMemo(() => agrupar("cliente"), [turnos, T, UM, FX]);
+  const repDepto = useMemo(() => agrupar("departamento"), [turnos, T, UM, FX]);
+  const repColaborador = useMemo(() => agrupar("colaborador"), [turnos, T, UM, FX]);
 
   const totHoras = turnos.reduce((s,t) => s + horasTurno(t.entrada, t.salida, t.descansoMin), 0);
-  const totCosto = Math.round(totHoras * T);
+  const totExtra = horasExtraTurnos(turnos, datos.bloqueMin, UM);
+  const totCosto = costoTurnos(turnos, T, datos.bloqueMin, UM, FX);
 
   const filasReporte = (rep, etiqueta) => [
-    [etiqueta, "Turnos", "Personas", "Horas", "Costo ₡"],
-    ...rep.map(r => [r.nombre, r.turnos, r.personas, r.horas, r.costo]),
-    ["TOTAL", turnos.length, new Set(turnos.map(t=>t.colaborador)).size, Math.round(totHoras*100)/100, totCosto],
+    [etiqueta, "Turnos", "Personas", "Horas", "Horas extra", "Costo ₡"],
+    ...rep.map(r => [r.nombre, r.turnos, r.personas, r.horas, r.extra, r.costo]),
+    ["TOTAL", turnos.length, new Set(turnos.map(t=>t.colaborador)).size, Math.round(totHoras*100)/100, totExtra, totCosto],
   ];
 
   const filasDetalle = () => [
-    ["Fecha","Departamento","Colaborador","Cliente","Entrada","Salida","Descanso min","Horas","Costo ₡","Embarques","Nota"],
+    ["Fecha","Departamento","Colaborador","Cliente","Entrada","Salida","Descanso min","Horas","Horas normales","Horas extra","Costo ₡","Embarques","Nota"],
     ...turnos.slice().sort((a,b) => a.fecha.localeCompare(b.fecha)).map(t => {
       const h = horasTurno(t.entrada, t.salida, t.descansoMin);
+      const { normales, extra } = desgloseHoras(h, UM);
       return [t.fecha, t.departamento, t.colaborador, t.cliente, t.entrada, t.salida,
-              t.descansoMin || 0, Math.round(h*100)/100, Math.round(h*T),
+              t.descansoMin || 0, Math.round(h*100)/100, hh(normales), hh(extra), costoTurno(h, T, UM, FX),
               (t.embarques||[]).map(e => e.codigo).join(" | "), t.nota || ""];
     }),
   ];
@@ -1294,7 +1386,7 @@ function Tablero({ datos, setPresupuesto }) {
 
       <div className="rejilla g4" style={{ marginTop: 14 }}>
         <Kpi rot={`Horas ${hoyISO().slice(0,4)}`} valor={hh(anioHoras)} sub="personal externo, año a la fecha" />
-        <Kpi rot={`Costo ${hoyISO().slice(0,4)}`} valor={crcK(anioHoras * T)} sub={crc(anioHoras * T)} />
+        <Kpi rot={`Costo ${hoyISO().slice(0,4)}`} valor={crcK(anioCosto)} sub={`${crc(anioCosto)} · ${hh(totExtra)} h extra`} />
         <Kpi rot="Promedio por ciclo" valor={hh(ventana.reduce((s,v)=>s+v.horas,0) / (ventana.length||1))}
              sub={`últimos ${ventana.length} ciclos`} />
         <Kpi rot="Tendencia semanal" valor={(pron.pendiente >= 0 ? "+" : "") + hh(pron.pendiente) + " h"}
@@ -1412,7 +1504,8 @@ function Tablero({ datos, setPresupuesto }) {
             <p className="kpi-s" style={{ marginTop: 10 }}>
               Mezcla de regresión lineal sobre los últimos {ventana.length} ciclos con suavizado exponencial del nivel reciente;
               la pendiente se amortigua un 15 % por semana. El rango cubre cerca del 80 % de los desenlaces según la dispersión histórica
-              (desviación de {hh(pron.sigma)} h). Confianza {pron.confianza}.
+              (desviación de {hh(pron.sigma)} h). Confianza {pron.confianza}. El costo proyectado es una estimación a tarifa base
+              (₡{miles(T)}/h) y no incluye recargo por horas extra, que depende de cómo se distribuyan las horas por turno.
             </p>
           </>)}
         </div>
@@ -1485,12 +1578,13 @@ function Tablero({ datos, setPresupuesto }) {
               <tbody>
                 {turnos.slice().sort((a,b) => b.fecha.localeCompare(a.fecha) || (b.entrada||"").localeCompare(a.entrada||"")).slice(0, 200).map(t => {
                   const h = horasTurno(t.entrada, t.salida, t.descansoMin);
+                  const ext = desgloseHoras(h, UM).extra;
                   return (
                     <tr key={t.id}>
                       <td className="n">{fmtCorto(t.fecha)}</td>
                       <td>{t.departamento}</td><td>{t.colaborador}</td><td>{t.cliente}</td>
-                      <td className="n">{hh(h)}</td>
-                      <td className="n" style={{ fontWeight: 600 }}>{crc(Math.round(h*T))}</td>
+                      <td className="n">{hh(h)}{ext > 0 && <span className="marca" style={{ marginLeft: 6, color: "var(--alerta)", borderColor: "var(--alerta)" }}>+{hh(ext)} ex</span>}</td>
+                      <td className="n" style={{ fontWeight: 600 }}>{crc(costoTurno(h, T, UM, FX))}</td>
                     </tr>
                   );
                 })}
@@ -1533,6 +1627,8 @@ function ListaEditable({ titulo, items, onAdd, onDel, placeholder }) {
 function Ajustes({ datos, setDatos, avisar, esAdmin = true }) {
   const up = (p) => setDatos(d => ({ ...d, ...p }));
   const [confirmar, setConfirmar] = useState(false);
+  const UM = datos.umbralExtra ?? UMBRAL_EXTRA_DEFECTO;
+  const FX = datos.factorExtra ?? FACTOR_EXTRA_DEFECTO;
   const mesesPres = useMemo(() => {
     const s = new Set([...Object.keys(datos.presupuestos), ...datos.turnos.map(t => claveMes(t.fecha))]);
     return [...s].sort().reverse();
@@ -1576,9 +1672,20 @@ function Ajustes({ datos, setDatos, avisar, esAdmin = true }) {
               </select>
             </label>
           </div>
+          <div className="fila">
+            <label className="campo"><span>Horas normales por turno (umbral extra)</span>
+              <input type="number" className="num-in" min="0" step="1" value={UM}
+                onChange={e => up({ umbralExtra: Number(e.target.value) || 0 })} />
+            </label>
+            <label className="campo"><span>Recargo hora extra (×)</span>
+              <input type="number" className="num-in" min="1" step="0.1" value={FX}
+                onChange={e => up({ factorExtra: Number(e.target.value) || 1 })} />
+            </label>
+          </div>
           <p className="kpi-s">
-            La tarifa se aplica a todo el histórico al recalcular. Si negociás una tarifa nueva a partir de una fecha,
-            registrala en el campo <code>tarifa_hora</code> del turno en el backend para conservar el costo histórico.
+            La tarifa se aplica a todo el histórico al recalcular. Las horas que superen el umbral en un mismo turno
+            (la hora {UM + 1} en adelante con umbral {UM}) se pagan a tarifa ×{String(FX).replace(".",",")} = ₡{miles(Math.round(datos.tarifa * FX))}/h.
+            El umbral aplica por turno, no sobre acumulados semanales.
           </p>
         </div>
       </div>
@@ -1605,8 +1712,7 @@ function Ajustes({ datos, setDatos, avisar, esAdmin = true }) {
             <thead><tr><th>Mes</th><th className="n">Presupuesto (₡)</th><th className="n">Ejecutado</th></tr></thead>
             <tbody>
               {mesesPres.map(k => {
-                const gasto = datos.turnos.filter(t => claveMes(t.fecha) === k)
-                  .reduce((s,t) => s + horasTurno(t.entrada, t.salida, t.descansoMin), 0) * datos.tarifa;
+                const gasto = costoTurnos(datos.turnos.filter(t => claveMes(t.fecha) === k), datos.tarifa, datos.bloqueMin, UM, FX);
                 return (
                   <tr key={k}>
                     <td style={{ fontWeight: 600 }}>{nombreMes(k)}</td>
@@ -1626,11 +1732,12 @@ function Ajustes({ datos, setDatos, avisar, esAdmin = true }) {
         <div className="placa-cab"><h2>Datos</h2></div>
         <div className="placa-cue" style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
           <button className="btn btn-2 btn-s" onClick={() => {
-            const filas = [["id","fecha","departamento","colaborador","cliente","entrada","salida","descanso_min","horas","costo_crc","embarques","nota"]];
+            const filas = [["id","fecha","departamento","colaborador","cliente","entrada","salida","descanso_min","horas","horas_normales","horas_extra","costo_crc","embarques","nota"]];
             datos.turnos.slice().sort((a,b) => a.fecha.localeCompare(b.fecha)).forEach(t => {
               const h = horasTurno(t.entrada, t.salida, t.descansoMin);
+              const { normales, extra } = desgloseHoras(h, UM);
               filas.push([t.id, t.fecha, t.departamento, t.colaborador, t.cliente, t.entrada, t.salida, t.descansoMin || 0,
-                hh(h), Math.round(h*datos.tarifa), t.embarques.map(e => e.codigo).join("|"), t.nota || ""]);
+                hh(h), hh(normales), hh(extra), costoTurno(h, datos.tarifa, UM, FX), t.embarques.map(e => e.codigo).join("|"), t.nota || ""]);
             });
             descargarCSV("cedis_turnos_completo.csv", filas);
           }}>Exportar todo a CSV</button>
@@ -1661,6 +1768,8 @@ function Ajustes({ datos, setDatos, avisar, esAdmin = true }) {
 function Embarques({ datos }) {
   const T = datos.tarifa;
   const bloque = datos.bloqueMin;
+  const UM = datos.umbralExtra ?? UMBRAL_EXTRA_DEFECTO;
+  const FX = datos.factorExtra ?? FACTOR_EXTRA_DEFECTO;
 
   // Rango de fechas por defecto: el ciclo recién cerrado (vie→jue).
   const cicloDef = useMemo(() => cicloAuditoria(new Date()), []);
@@ -1687,10 +1796,10 @@ function Embarques({ datos }) {
 
   // Costo agregado por embarque, luego filtrado por texto de búsqueda.
   const reporte = useMemo(() => {
-    const filas = costoPorEmbarque(turnosRango, T, bloque);
+    const filas = costoPorEmbarque(turnosRango, T, bloque, UM, FX);
     const q = busca.trim().toUpperCase();
     return q ? filas.filter(f => f.codigo.includes(q)) : filas;
-  }, [turnosRango, T, bloque, busca]);
+  }, [turnosRango, T, bloque, UM, FX, busca]);
 
   const totHoras = reporte.reduce((s, r) => s + r.horas, 0);
   const totCosto = reporte.reduce((s, r) => s + r.costo, 0);
@@ -1707,15 +1816,20 @@ function Embarques({ datos }) {
   ];
 
   // Detalle línea a línea: cada embarque con el turno/colaborador que aportó horas.
+  // El costo del turno (con extra) se prorratea entre sus embarques por horas.
   const filasDetalle = () => {
     const out = [["Embarque","Fecha","Cliente","Colaborador","Departamento","Horas embarque","Costo ₡","Entrada","Salida"]];
     turnosRango.slice()
       .sort((a,b) => a.fecha.localeCompare(b.fecha))
       .forEach(t => {
-        horasPorEmbarque(t, bloque).forEach(({ codigo, horas }) => {
+        const reparto = horasPorEmbarque(t, bloque);
+        const totH = reparto.reduce((s, e) => s + e.horas, 0);
+        const costoT = costoDeTurno(t, T, bloque, UM, FX);
+        reparto.forEach(({ codigo, horas }) => {
           if (busca.trim() && !codigo.includes(busca.trim().toUpperCase())) return;
+          const costo = totH > 0 ? Math.round((costoT * horas) / totH) : 0;
           out.push([codigo, fmtLargo(t.fecha), t.cliente, t.colaborador, t.departamento,
-            Math.round(horas*100)/100, Math.round(horas*T), t.entrada, t.salida]);
+            Math.round(horas*100)/100, costo, t.entrada, t.salida]);
         });
       });
     return out;
@@ -2021,7 +2135,9 @@ export default function App() {
       </header>
 
       {(tab === "registro" || tab === "tablero") && (
-        <CintaCiclo turnos={turnosCiclo} rango={cicloHoy} tarifa={datos.tarifa} titulo="Ciclo en curso · viernes a jueves" />
+        <CintaCiclo turnos={turnosCiclo} rango={cicloHoy} tarifa={datos.tarifa}
+          umbral={datos.umbralExtra ?? UMBRAL_EXTRA_DEFECTO} factor={datos.factorExtra ?? FACTOR_EXTRA_DEFECTO}
+          titulo="Ciclo en curso · viernes a jueves" />
       )}
 
       {vacio && tab !== "ajustes" && (
