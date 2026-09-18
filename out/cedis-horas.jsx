@@ -1042,6 +1042,9 @@ function Semana({ datos, offset, setOffset }) {
   const UM = datos.umbralExtra ?? UMBRAL_EXTRA_DEFECTO;
   const FX = datos.factorExtra ?? FACTOR_EXTRA_DEFECTO;
 
+  // Filtro por departamento (afecta el reporte diario y los desgloses).
+  const [fDepto, setFDepto] = useState("");   // "" = todos
+
   // Modo de período: "ciclo" (viernes→jueves) o "rango" (fechas libres).
   const [modo, setModo] = useState("ciclo");
   const cicloActual = useMemo(() => ciclo(new Date(), offset), [offset]);
@@ -1060,8 +1063,9 @@ function Semana({ datos, offset, setOffset }) {
     return { inicio: ini, fin, etiqueta: `${fmtCorto(ini)} – ${fmtCorto(fin)}` };
   }, [modo, offset, rDesde, rHasta]);
 
-  const enCiclo = useMemo(() => datos.turnos.filter(t => enRango(t.fecha, rango)), [datos.turnos, rango.inicio, rango.fin]);
-  const enPrevio = useMemo(() => datos.turnos.filter(t => enRango(t.fecha, previo)), [datos.turnos, previo]);
+  const pasaDepto = (t) => !fDepto || t.departamento === fDepto;
+  const enCiclo = useMemo(() => datos.turnos.filter(t => enRango(t.fecha, rango) && pasaDepto(t)), [datos.turnos, rango.inicio, rango.fin, fDepto]);
+  const enPrevio = useMemo(() => datos.turnos.filter(t => enRango(t.fecha, previo) && pasaDepto(t)), [datos.turnos, previo, fDepto]);
 
   const suma = (ts) => ts.reduce((s,t) => s + horasTurno(t.entrada, t.salida, t.descansoMin), 0);
   const horas = suma(enCiclo), horasPrev = suma(enPrevio);
@@ -1074,6 +1078,65 @@ function Semana({ datos, offset, setOffset }) {
   const porCliente = agruparPorCliente(enCiclo, T, UM, FX, datos.bloqueMin);
   const porDepto   = agrupar(enCiclo, "departamento", T, UM, FX);
   const porPersona = agrupar(enCiclo, "colaborador", T, UM, FX);
+
+  /* — RESUMEN DIARIO: total por día de jornadas/turnos, horas y costos — */
+  const resumenDiario = useMemo(() => {
+    // Un día por cada fecha del período (para ciclo son 7; para rango, todas las del rango).
+    const ini = aFecha(rango.inicio);
+    const ndias = Math.round((aFecha(rango.fin) - ini) / 86400000) + 1;
+    return Array.from({ length: Math.max(0, ndias) }, (_, i) => {
+      const iso = aISO(sumaDias(ini, i));
+      const ts = enCiclo.filter(t => t.fecha === iso);
+      let horasT = 0, horasN = 0, horasE = 0, costoN = 0, costoE = 0;
+      const cols = new Set();
+      ts.forEach(t => {
+        const h = horasTurno(t.entrada, t.salida, t.descansoMin, datos.bloqueMin);
+        const { normales, extra } = desgloseHoras(h, UM);
+        horasT += h; horasN += normales; horasE += extra;
+        costoN += Math.round(normales * T);
+        costoE += Math.round(extra * T * FX);
+        if (t.colaborador) cols.add(t.colaborador);
+      });
+      return {
+        iso,
+        colaboradores: cols.size,
+        turnos: ts.length,
+        horas: Math.round(horasT * 100) / 100,
+        horasExtra: Math.round(horasE * 100) / 100,
+        subtotalNormal: Math.round(costoN),
+        costoExtra: Math.round(costoE),
+        totalDia: Math.round(costoN + costoE),
+      };
+    });
+  }, [enCiclo, rango.inicio, rango.fin, T, UM, FX, datos.bloqueMin]);
+
+  const totDiario = useMemo(() => resumenDiario.reduce((a, d) => ({
+    colaboradores: 0, turnos: a.turnos + d.turnos, horas: a.horas + d.horas,
+    horasExtra: a.horasExtra + d.horasExtra, subtotalNormal: a.subtotalNormal + d.subtotalNormal,
+    costoExtra: a.costoExtra + d.costoExtra, totalDia: a.totalDia + d.totalDia,
+  }), { turnos: 0, horas: 0, horasExtra: 0, subtotalNormal: 0, costoExtra: 0, totalDia: 0 }), [resumenDiario]);
+  // Colaboradores distintos en todo el período (no la suma de los diarios).
+  const colsPeriodo = new Set(enCiclo.map(t => t.colaborador)).size;
+
+  const exportarDiario = () => {
+    const filas = [[
+      "Fecha", "Cantidad colaboradores", "Cantidad de horas", "Cantidad de costo",
+      "Sub total jornada normal", "Cantidad horas extra", "Cantidad costo horas extra",
+      "Total horas extra", "Total general del día",
+    ]];
+    resumenDiario.forEach(d => {
+      filas.push([
+        fmtLargo(d.iso), d.colaboradores, hh(d.horas), d.subtotalNormal,
+        d.subtotalNormal, hh(d.horasExtra), d.costoExtra, d.costoExtra, d.totalDia,
+      ]);
+    });
+    filas.push([
+      "TOTAL", colsPeriodo, hh(totDiario.horas), totDiario.subtotalNormal,
+      totDiario.subtotalNormal, hh(totDiario.horasExtra), totDiario.costoExtra, totDiario.costoExtra, totDiario.totalDia,
+    ]);
+    const suf = fDepto ? "_" + fDepto : "";
+    descargarCSV(`resumen_diario${suf}_${rango.inicio}_${rango.fin}.csv`, filas);
+  };
 
   // Si el ciclo mostrado está vacío, buscá el ciclo más reciente que sí tenga turnos.
   const cicloConDatos = useMemo(() => {
@@ -1154,6 +1217,69 @@ function Semana({ datos, offset, setOffset }) {
           <Kpi rot={modo === "ciclo" ? "Contra ciclo anterior" : "Contra período anterior"} valor={(delta >= 0 ? "+" : "") + pct(delta)}
             sub={`${hh(horasPrev)} h el período previo`}
             color={delta > 0.1 ? "var(--alerta)" : delta < -0.05 ? "var(--ok)" : undefined} />
+        </div>
+
+        {/* ── RESUMEN DIARIO (primer reporte) ── */}
+        <div className="placa">
+          <div className="placa-cab" style={{ gap: 10, flexWrap: "wrap" }}>
+            <h2>Resumen diario</h2>
+            <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+              <label className="campo" style={{ margin: 0 }}>
+                <select value={fDepto} onChange={e => setFDepto(e.target.value)}
+                  style={{ width: "auto", padding: "7px 10px", fontSize: 14 }}>
+                  <option value="">Todos los departamentos</option>
+                  {datos.departamentos.map(d => <option key={d} value={d}>{d}</option>)}
+                </select>
+              </label>
+              <button className="btn btn-2 btn-s" onClick={exportarDiario} disabled={!enCiclo.length}>Descargar CSV</button>
+            </div>
+          </div>
+          {fDepto && (
+            <div className="placa-cue" style={{ paddingBottom: 0, color: "var(--tinta-2)", fontSize: 13 }}>
+              Filtrando por departamento: <strong>{fDepto}</strong>.
+            </div>
+          )}
+          {!enCiclo.length ? (
+            <div className="vacio"><p>No hay jornadas en el período{fDepto ? ` para ${fDepto}` : ""}.</p></div>
+          ) : (
+            <div className="tabla-env">
+              <table>
+                <thead><tr>
+                  <th>Fecha</th>
+                  <th className="n">Colaboradores</th>
+                  <th className="n">Horas</th>
+                  <th className="n">Sub total jornada normal</th>
+                  <th className="n">Horas extra</th>
+                  <th className="n">Costo horas extra</th>
+                  <th className="n">Total general del día</th>
+                </tr></thead>
+                <tbody>
+                  {resumenDiario.map(d => (
+                    <tr key={d.iso} style={d.turnos === 0 ? { color: "var(--tinta-3)" } : undefined}>
+                      <td style={{ fontWeight: 600 }}>{fmtLargo(d.iso)}
+                        <div style={{ fontSize: 11, color: "var(--tinta-3)", fontWeight: 400 }}>{DIAS[(aFecha(d.iso).getDay() - DIA_CORTE + 7) % 7]} · {d.turnos} turnos</div>
+                      </td>
+                      <td className="n">{d.colaboradores}</td>
+                      <td className="n">{hh(d.horas)}</td>
+                      <td className="n">{crc(d.subtotalNormal)}</td>
+                      <td className="n" style={{ color: d.horasExtra > 0 ? "var(--alerta)" : undefined }}>{hh(d.horasExtra)}</td>
+                      <td className="n" style={{ color: d.costoExtra > 0 ? "var(--alerta)" : undefined }}>{crc(d.costoExtra)}</td>
+                      <td className="n" style={{ fontWeight: 600 }}>{crc(d.totalDia)}</td>
+                    </tr>
+                  ))}
+                  <tr className="tot">
+                    <td>Gran total</td>
+                    <td className="n">{colsPeriodo}</td>
+                    <td className="n">{hh(totDiario.horas)}</td>
+                    <td className="n">{crc(totDiario.subtotalNormal)}</td>
+                    <td className="n">{hh(totDiario.horasExtra)}</td>
+                    <td className="n">{crc(totDiario.costoExtra)}</td>
+                    <td className="n" style={{ fontWeight: 700 }}>{crc(totDiario.totalDia)}</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          )}
         </div>
 
         {modo === "ciclo" && offset === 0 && (
