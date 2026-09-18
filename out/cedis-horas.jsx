@@ -286,6 +286,28 @@ function horasExtraTurnos(turnos, bloqueMin = 1, umbral = UMBRAL_EXTRA_DEFECTO) 
 }
 
 /**
+ * Desglose de un turno separando la parte NORMAL de la EXTRA y a qué cliente
+ * se le atribuye cada una. Las horas extra pueden facturarse a OTRA compañía
+ * (t.clienteExtra) distinta a la del horario normal (t.cliente).
+ * Devuelve las horas, el costo y el cliente de cada parte.
+ */
+function desgloseTurnoCliente(t, tarifa, bloqueMin = 1, umbral = UMBRAL_EXTRA_DEFECTO, factor = FACTOR_EXTRA_DEFECTO) {
+  const h = horasTurno(t.entrada, t.salida, t.descansoMin || 0, bloqueMin);
+  const { normales, extra } = desgloseHoras(h, umbral);
+  const clienteNormal = t.cliente || "—";
+  // Solo tiene sentido un cliente extra si hay horas extra; si no se indicó, cae en el normal.
+  const clienteExtra = extra > 0 ? ((t.clienteExtra || "").trim() || clienteNormal) : clienteNormal;
+  return {
+    horasNormales: normales,
+    horasExtra: extra,
+    clienteNormal,
+    clienteExtra,
+    costoNormal: Math.round(normales * tarifa),
+    costoExtra: Math.round(extra * factor * tarifa),
+  };
+}
+
+/**
  * Reparte las horas de un turno entre sus embarques.
  * - Si el embarque tiene `horas` cargadas, se respetan.
  * - Las horas del turno que no quedaron asignadas se reparten en partes iguales
@@ -719,7 +741,7 @@ function descargarExcel(nombreArchivo, hojas) {
    ════════════════════════════════════════════════════════ */
 
 const TURNO_VACIO = () => ({
-  id: null, fecha: hoyISO(), departamento: "", colaborador: "", cliente: "",
+  id: null, fecha: hoyISO(), departamento: "", colaborador: "", cliente: "", clienteExtra: "",
   entrada: "07:00", salida: "", descansoMin: 30, nota: "",
   embarques: [{ id: "n1", codigo: "", horas: "" }],
 });
@@ -727,6 +749,7 @@ const TURNO_VACIO = () => ({
 function Registro({ datos, guardar, borrar, avisar }) {
   const [f, setF] = useState(TURNO_VACIO);
   const [nuevoCliente, setNuevoCliente] = useState(false);
+  const [nuevoClienteExtra, setNuevoClienteExtra] = useState(false);
   const set = (k, v) => setF(p => ({ ...p, [k]: v }));
 
   const UM = datos.umbralExtra ?? UMBRAL_EXTRA_DEFECTO;
@@ -768,20 +791,26 @@ function Registro({ datos, guardar, borrar, avisar }) {
 
   const enviar = () => {
     if (!listo) return;
+    // El cliente de horas extra solo se guarda si hubo extra y difiere del normal.
+    const cliExtra = horasExtra > 0 ? (f.clienteExtra || "").trim() : "";
     guardar({
       id: f.id || "t" + Date.now() + Math.random().toString(36).slice(2,6),
       fecha: f.fecha, departamento: f.departamento, colaborador: f.colaborador.trim(),
-      cliente: f.cliente, entrada: f.entrada, salida: f.salida,
+      cliente: f.cliente, clienteExtra: cliExtra && cliExtra !== f.cliente ? cliExtra : "",
+      entrada: f.entrada, salida: f.salida,
       descansoMin: Number(f.descansoMin) || 0, nota: f.nota.trim(),
       embarques: embValidos.map(e => ({ id: e.id, codigo: e.codigo.trim().toUpperCase(), horas: Number(e.horas) || 0 })),
     });
-    avisar(`${f.id ? "Turno actualizado" : "Turno registrado"} · ${hh(horas)} h · ${crc(costo)}`);
+    const extraMsg = cliExtra && cliExtra !== f.cliente ? ` · extra a ${cliExtra}` : "";
+    avisar(`${f.id ? "Turno actualizado" : "Turno registrado"} · ${hh(horas)} h · ${crc(costo)}${extraMsg}`);
     setF({ ...TURNO_VACIO(), fecha: f.fecha, departamento: f.departamento, cliente: f.cliente });
+    setNuevoClienteExtra(false);
   };
 
   const editar = (t) => {
-    setF({ ...t, descansoMin: t.descansoMin ?? 0, nota: t.nota || "",
+    setF({ ...t, descansoMin: t.descansoMin ?? 0, nota: t.nota || "", clienteExtra: t.clienteExtra || "",
       embarques: t.embarques.length ? t.embarques : [{ id: "n1", codigo: "", horas: "" }] });
+    setNuevoClienteExtra(false);
     window.scrollTo({ top: 0, behavior: "smooth" });
   };
 
@@ -879,6 +908,29 @@ function Registro({ datos, guardar, borrar, avisar }) {
             <div className="aviso" style={{ marginBottom: 14 }}>
               Este turno supera las {UM} h: {hh(horasExtra)} h se pagan como extra a ₡{miles(Math.round(datos.tarifa * FX))}/h
               (tarifa ×{String(FX).replace(".",",")}), {crc(costoExtra)} de recargo.
+              <label className="campo" style={{ marginTop: 12, marginBottom: 0 }}>
+                <span>Compañía de las horas extra</span>
+                {nuevoClienteExtra ? (
+                  <input autoFocus placeholder="Nombre de la compañía" value={f.clienteExtra}
+                    onChange={e => set("clienteExtra", e.target.value)}
+                    onBlur={() => !f.clienteExtra && setNuevoClienteExtra(false)} />
+                ) : (
+                  <select value={f.clienteExtra}
+                    onChange={e => e.target.value === "__nuevo"
+                      ? (setNuevoClienteExtra(true), set("clienteExtra", ""))
+                      : set("clienteExtra", e.target.value)}>
+                    <option value="">Misma compañía del turno ({f.cliente || "—"})</option>
+                    {datos.clientes.filter(c => c !== f.cliente).map(c => <option key={c} value={c}>{c}</option>)}
+                    <option value="__nuevo">+ Agregar compañía</option>
+                  </select>
+                )}
+              </label>
+              {f.clienteExtra && f.clienteExtra !== f.cliente && (
+                <div style={{ marginTop: 8, fontSize: 13 }}>
+                  {hh(horasNormales)} h normales ({crc(costoNormal)}) → <strong>{f.cliente}</strong>.{" "}
+                  {hh(horasExtra)} h extra ({crc(costoExtra)}) → <strong>{f.clienteExtra}</strong>.
+                </div>
+              )}
             </div>
           )}
 
@@ -914,7 +966,11 @@ function Registro({ datos, guardar, borrar, avisar }) {
                   return (
                     <tr key={t.id}>
                       <td style={{ fontWeight: 600 }}>{t.colaborador}</td>
-                      <td>{t.departamento}</td><td>{t.cliente}</td>
+                      <td>{t.departamento}</td>
+                      <td>{t.cliente}
+                        {ext > 0 && (t.clienteExtra || "").trim() && t.clienteExtra !== t.cliente &&
+                          <div style={{ fontSize: 11, color: "var(--alerta)" }}>extra → {t.clienteExtra}</div>}
+                      </td>
                       <td className="n">{t.entrada}</td><td className="n">{t.salida}</td>
                       <td className="n">{hh(h)}{ext > 0 && <span className="marca" style={{ marginLeft: 6, color: "var(--alerta)", borderColor: "var(--alerta)" }}>+{hh(ext)} ex</span>}</td>
                       <td className="n">{crc(costoTurno(h, datos.tarifa, UM, FX))}</td>
@@ -954,6 +1010,33 @@ function agrupar(turnos, clave, tarifa, umbral = UMBRAL_EXTRA_DEFECTO, factor = 
   return [...m.values()].sort((a,b) => b.costo - a.costo);
 }
 
+/**
+ * Agrupa POR CLIENTE separando la parte normal de la extra: el costo y las horas
+ * normales van al cliente del turno; el costo y las horas extra van al clienteExtra
+ * (o al mismo cliente si no se indicó otra compañía).
+ */
+function agruparPorCliente(turnos, tarifa, umbral = UMBRAL_EXTRA_DEFECTO, factor = FACTOR_EXTRA_DEFECTO, bloqueMin = 1) {
+  const m = new Map();
+  const add = (nombre, horas, extra, costo, esTurnoNuevo) => {
+    const a = m.get(nombre) || { nombre, horas: 0, extra: 0, costo: 0, turnos: 0 };
+    a.horas += horas; a.extra += extra; a.costo += costo; if (esTurnoNuevo) a.turnos++;
+    m.set(nombre, a);
+  };
+  turnos.forEach(t => {
+    const d = desgloseTurnoCliente(t, tarifa, bloqueMin, umbral, factor);
+    // Parte normal → cliente del turno (cuenta como 1 turno).
+    add(d.clienteNormal, d.horasNormales, 0, d.costoNormal, true);
+    if (d.horasExtra > 0) {
+      // Parte extra → clienteExtra. No vuelve a contar el turno (esTurnoNuevo=false)
+      // para no inflar el conteo de turnos por cliente.
+      add(d.clienteExtra, d.horasExtra, d.horasExtra, d.costoExtra, false);
+    }
+  });
+  return [...m.values()]
+    .map(x => ({ ...x, horas: Math.round(x.horas*100)/100, extra: Math.round(x.extra*100)/100, costo: Math.round(x.costo) }))
+    .sort((a,b) => b.costo - a.costo);
+}
+
 function Semana({ datos, offset, setOffset }) {
   const T = datos.tarifa;
   const UM = datos.umbralExtra ?? UMBRAL_EXTRA_DEFECTO;
@@ -988,7 +1071,7 @@ function Semana({ datos, offset, setOffset }) {
   const embarques = enCiclo.reduce((s,t) => s + t.embarques.length, 0);
   const delta = horasPrev > 0 ? (horas - horasPrev) / horasPrev : 0;
 
-  const porCliente = agrupar(enCiclo, "cliente", T, UM, FX);
+  const porCliente = agruparPorCliente(enCiclo, T, UM, FX, datos.bloqueMin);
   const porDepto   = agrupar(enCiclo, "departamento", T, UM, FX);
   const porPersona = agrupar(enCiclo, "colaborador", T, UM, FX);
 
@@ -1003,18 +1086,19 @@ function Semana({ datos, offset, setOffset }) {
   }, [enCiclo.length, datos.turnos]);
 
   const exportar = () => {
-    const filas = [["Fecha","Departamento","Colaborador","Cliente","Entrada","Salida","Descanso (min)","Horas","Horas normales","Horas extra","Tarifa CRC","Costo normal CRC","Costo extra CRC","Costo total CRC","Embarques","Observaciones"]];
+    const filas = [["Fecha","Departamento","Colaborador","Cliente (normal)","Cliente extra","Entrada","Salida","Descanso (min)","Horas","Horas normales","Horas extra","Tarifa CRC","Costo normal CRC","Costo extra CRC","Costo total CRC","Embarques","Observaciones"]];
     enCiclo.slice().sort((a,b) => a.fecha.localeCompare(b.fecha)).forEach(t => {
       const h = horasTurno(t.entrada, t.salida, t.descansoMin);
       const { normales, extra } = desgloseHoras(h, UM);
       const costoNorm = Math.round(normales * T);
       const costoExt = Math.round(extra * T * FX);
-      filas.push([fmtLargo(t.fecha), t.departamento, t.colaborador, t.cliente, t.entrada, t.salida,
+      const cliExtra = extra > 0 && (t.clienteExtra || "").trim() && t.clienteExtra !== t.cliente ? t.clienteExtra : "";
+      filas.push([fmtLargo(t.fecha), t.departamento, t.colaborador, t.cliente, cliExtra, t.entrada, t.salida,
         t.descansoMin || 0, hh(h), hh(normales), hh(extra), T, costoNorm, costoExt, costoNorm + costoExt,
         t.embarques.map(e => e.codigo + (e.horas ? `(${hh(e.horas)}h)` : "")).join(" | "), t.nota || ""]);
     });
     filas.push([]);
-    filas.push([modo === "ciclo" ? "TOTAL CICLO" : "TOTAL RANGO", `${fmtLargo(rango.inicio)} a ${fmtLargo(rango.fin)}`, "", "", "", "", "",
+    filas.push([modo === "ciclo" ? "TOTAL CICLO" : "TOTAL RANGO", `${fmtLargo(rango.inicio)} a ${fmtLargo(rango.fin)}`, "", "", "", "", "", "",
       hh(horas), hh(horas - horasExtra), hh(horasExtra), T, "", "", Math.round(costo)]);
     descargarCSV(`${modo === "ciclo" ? "auditoria" : "reporte_rango"}_${rango.inicio}_${rango.fin}.csv`, filas);
   };
@@ -1311,7 +1395,19 @@ function Tablero({ datos, setPresupuesto }) {
                    extra: Math.round(x.extra*100)/100, personas: x.personas.size, costo: Math.round(x.costo) }))
       .sort((a,b) => b.costo - a.costo);
   };
-  const repCliente = useMemo(() => agrupar("cliente"), [turnos, T, UM, FX]);
+  // Por cliente: el costo/horas extra se atribuyen al clienteExtra si difiere.
+  const repCliente = useMemo(() => {
+    const base = agruparPorCliente(turnos, T, UM, FX, datos.bloqueMin);
+    // Aportar el conteo de personas por cliente (normal + extra).
+    const pers = new Map();
+    turnos.forEach(t => {
+      const d = desgloseTurnoCliente(t, T, datos.bloqueMin, UM, FX);
+      (pers.get(d.clienteNormal) || pers.set(d.clienteNormal, new Set()).get(d.clienteNormal)).add(t.colaborador);
+      if (d.horasExtra > 0)
+        (pers.get(d.clienteExtra) || pers.set(d.clienteExtra, new Set()).get(d.clienteExtra)).add(t.colaborador);
+    });
+    return base.map(x => ({ ...x, personas: (pers.get(x.nombre) || new Set()).size }));
+  }, [turnos, T, UM, FX, datos.bloqueMin]);
   const repDepto = useMemo(() => agrupar("departamento"), [turnos, T, UM, FX]);
   const repColaborador = useMemo(() => agrupar("colaborador"), [turnos, T, UM, FX]);
 
@@ -1326,11 +1422,12 @@ function Tablero({ datos, setPresupuesto }) {
   ];
 
   const filasDetalle = () => [
-    ["Fecha","Departamento","Colaborador","Cliente","Entrada","Salida","Descanso min","Horas","Horas normales","Horas extra","Costo ₡","Embarques","Nota"],
+    ["Fecha","Departamento","Colaborador","Cliente (normal)","Cliente extra","Entrada","Salida","Descanso min","Horas","Horas normales","Horas extra","Costo ₡","Embarques","Nota"],
     ...turnos.slice().sort((a,b) => a.fecha.localeCompare(b.fecha)).map(t => {
       const h = horasTurno(t.entrada, t.salida, t.descansoMin);
       const { normales, extra } = desgloseHoras(h, UM);
-      return [t.fecha, t.departamento, t.colaborador, t.cliente, t.entrada, t.salida,
+      const cliExtra = extra > 0 && (t.clienteExtra || "").trim() && t.clienteExtra !== t.cliente ? t.clienteExtra : "";
+      return [t.fecha, t.departamento, t.colaborador, t.cliente, cliExtra, t.entrada, t.salida,
               t.descansoMin || 0, Math.round(h*100)/100, hh(normales), hh(extra), costoTurno(h, T, UM, FX),
               (t.embarques||[]).map(e => e.codigo).join(" | "), t.nota || ""];
     }),
@@ -1732,11 +1829,12 @@ function Ajustes({ datos, setDatos, avisar, esAdmin = true }) {
         <div className="placa-cab"><h2>Datos</h2></div>
         <div className="placa-cue" style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
           <button className="btn btn-2 btn-s" onClick={() => {
-            const filas = [["id","fecha","departamento","colaborador","cliente","entrada","salida","descanso_min","horas","horas_normales","horas_extra","costo_crc","embarques","nota"]];
+            const filas = [["id","fecha","departamento","colaborador","cliente","cliente_extra","entrada","salida","descanso_min","horas","horas_normales","horas_extra","costo_crc","embarques","nota"]];
             datos.turnos.slice().sort((a,b) => a.fecha.localeCompare(b.fecha)).forEach(t => {
               const h = horasTurno(t.entrada, t.salida, t.descansoMin);
               const { normales, extra } = desgloseHoras(h, UM);
-              filas.push([t.id, t.fecha, t.departamento, t.colaborador, t.cliente, t.entrada, t.salida, t.descansoMin || 0,
+              const cliExtra = extra > 0 && (t.clienteExtra || "").trim() && t.clienteExtra !== t.cliente ? t.clienteExtra : "";
+              filas.push([t.id, t.fecha, t.departamento, t.colaborador, t.cliente, cliExtra, t.entrada, t.salida, t.descansoMin || 0,
                 hh(h), hh(normales), hh(extra), costoTurno(h, datos.tarifa, UM, FX), t.embarques.map(e => e.codigo).join("|"), t.nota || ""]);
             });
             descargarCSV("cedis_turnos_completo.csv", filas);
@@ -2078,7 +2176,7 @@ export default function App() {
   const guardarTurno = (t) => setDatos(d => ({
     ...d,
     colaboradores: [...new Set([...d.colaboradores, t.colaborador])].sort(),
-    clientes: [...new Set([...d.clientes, t.cliente])],
+    clientes: [...new Set([...d.clientes, t.cliente, ...(t.clienteExtra ? [t.clienteExtra] : [])])],
     turnos: d.turnos.some(x => x.id === t.id) ? d.turnos.map(x => x.id === t.id ? t : x) : [...d.turnos, t],
   }));
   const borrarTurno = (id) => { setDatos(d => ({ ...d, turnos: d.turnos.filter(t => t.id !== id) })); avisar("Turno eliminado"); };
