@@ -1042,8 +1042,9 @@ function Semana({ datos, offset, setOffset }) {
   const UM = datos.umbralExtra ?? UMBRAL_EXTRA_DEFECTO;
   const FX = datos.factorExtra ?? FACTOR_EXTRA_DEFECTO;
 
-  // Filtro por departamento (afecta el reporte diario y los desgloses).
-  const [fDepto, setFDepto] = useState("");   // "" = todos
+  // Filtro por departamento (multi-selección). [] = todos.
+  const [fDeptos, setFDeptos] = useState([]);
+  const toggleDepto = (d) => setFDeptos(p => p.includes(d) ? p.filter(x => x !== d) : [...p, d]);
 
   // Modo de período: "ciclo" (viernes→jueves) o "rango" (fechas libres).
   const [modo, setModo] = useState("ciclo");
@@ -1063,9 +1064,9 @@ function Semana({ datos, offset, setOffset }) {
     return { inicio: ini, fin, etiqueta: `${fmtCorto(ini)} – ${fmtCorto(fin)}` };
   }, [modo, offset, rDesde, rHasta]);
 
-  const pasaDepto = (t) => !fDepto || t.departamento === fDepto;
-  const enCiclo = useMemo(() => datos.turnos.filter(t => enRango(t.fecha, rango) && pasaDepto(t)), [datos.turnos, rango.inicio, rango.fin, fDepto]);
-  const enPrevio = useMemo(() => datos.turnos.filter(t => enRango(t.fecha, previo) && pasaDepto(t)), [datos.turnos, previo, fDepto]);
+  const pasaDepto = (t) => fDeptos.length === 0 || fDeptos.includes(t.departamento);
+  const enCiclo = useMemo(() => datos.turnos.filter(t => enRango(t.fecha, rango) && pasaDepto(t)), [datos.turnos, rango.inicio, rango.fin, fDeptos]);
+  const enPrevio = useMemo(() => datos.turnos.filter(t => enRango(t.fecha, previo) && pasaDepto(t)), [datos.turnos, previo, fDeptos]);
 
   const suma = (ts) => ts.reduce((s,t) => s + horasTurno(t.entrada, t.salida, t.descansoMin), 0);
   const horas = suma(enCiclo), horasPrev = suma(enPrevio);
@@ -1119,22 +1120,24 @@ function Semana({ datos, offset, setOffset }) {
   const colsPeriodo = new Set(enCiclo.map(t => t.colaborador)).size;
 
   const exportarDiario = () => {
+    const montoHora = T;
+    const montoHoraExtra = Math.round(T * FX);
     const filas = [[
       "Fecha", "Cantidad colaboradores", "Cantidad de horas", "Cantidad de costo",
-      "Sub total jornada normal", "Cantidad horas extra", "Cantidad costo horas extra",
-      "Total horas extra", "Total general del día",
+      "Monto hora", "Sub total jornada normal", "Cantidad horas extra", "Monto hora extra",
+      "Cantidad costo horas extra", "Total horas extra", "Total general del día",
     ]];
     resumenDiario.forEach(d => {
       filas.push([
         fmtLargo(d.iso), d.colaboradores, hh(d.horas), d.subtotalNormal,
-        d.subtotalNormal, hh(d.horasExtra), d.costoExtra, d.costoExtra, d.totalDia,
+        montoHora, d.subtotalNormal, hh(d.horasExtra), montoHoraExtra, d.costoExtra, d.costoExtra, d.totalDia,
       ]);
     });
     filas.push([
       "TOTAL", colsPeriodo, hh(totDiario.horas), totDiario.subtotalNormal,
-      totDiario.subtotalNormal, hh(totDiario.horasExtra), totDiario.costoExtra, totDiario.costoExtra, totDiario.totalDia,
+      montoHora, totDiario.subtotalNormal, hh(totDiario.horasExtra), montoHoraExtra, totDiario.costoExtra, totDiario.costoExtra, totDiario.totalDia,
     ]);
-    const suf = fDepto ? "_" + fDepto : "";
+    const suf = fDeptos.length ? "_" + fDeptos.join("-").replace(/[^\w-]/g, "") : "";
     descargarCSV(`resumen_diario${suf}_${rango.inicio}_${rango.fin}.csv`, filas);
   };
 
@@ -1223,24 +1226,27 @@ function Semana({ datos, offset, setOffset }) {
         <div className="placa">
           <div className="placa-cab" style={{ gap: 10, flexWrap: "wrap" }}>
             <h2>Resumen diario</h2>
-            <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
-              <label className="campo" style={{ margin: 0 }}>
-                <select value={fDepto} onChange={e => setFDepto(e.target.value)}
-                  style={{ width: "auto", padding: "7px 10px", fontSize: 14 }}>
-                  <option value="">Todos los departamentos</option>
-                  {datos.departamentos.map(d => <option key={d} value={d}>{d}</option>)}
-                </select>
-              </label>
-              <button className="btn btn-2 btn-s" onClick={exportarDiario} disabled={!enCiclo.length}>Descargar CSV</button>
-            </div>
+            <button className="btn btn-2 btn-s" onClick={exportarDiario} disabled={!enCiclo.length}>Descargar CSV</button>
           </div>
-          {fDepto && (
-            <div className="placa-cue" style={{ paddingBottom: 0, color: "var(--tinta-2)", fontSize: 13 }}>
-              Filtrando por departamento: <strong>{fDepto}</strong>.
+          <div className="placa-cue" style={{ paddingBottom: 0 }}>
+            <div className="rot" style={{ marginBottom: 8 }}>Filtrar por departamento</div>
+            <div className="chips">
+              <button className="chip" aria-pressed={fDeptos.length === 0}
+                onClick={() => setFDeptos([])}>Todos los departamentos</button>
+              {datos.departamentos.map(d => (
+                <button key={d} className="chip" aria-pressed={fDeptos.includes(d)}
+                  onClick={() => toggleDepto(d)}>{d}</button>
+              ))}
             </div>
-          )}
+            {fDeptos.length > 0 && (
+              <div style={{ marginTop: 8, color: "var(--tinta-2)", fontSize: 13 }}>
+                Mostrando {fDeptos.length} departamento{fDeptos.length > 1 ? "s" : ""}: <strong>{fDeptos.join(", ")}</strong>.{" "}
+                <button className="lig" onClick={() => setFDeptos([])}>Limpiar</button>
+              </div>
+            )}
+          </div>
           {!enCiclo.length ? (
-            <div className="vacio"><p>No hay jornadas en el período{fDepto ? ` para ${fDepto}` : ""}.</p></div>
+            <div className="vacio"><p>No hay jornadas en el período{fDeptos.length ? ` para ${fDeptos.join(", ")}` : ""}.</p></div>
           ) : (
             <div className="tabla-env">
               <table>
@@ -1248,8 +1254,10 @@ function Semana({ datos, offset, setOffset }) {
                   <th>Fecha</th>
                   <th className="n">Colaboradores</th>
                   <th className="n">Horas</th>
+                  <th className="n">Monto hora</th>
                   <th className="n">Sub total jornada normal</th>
                   <th className="n">Horas extra</th>
+                  <th className="n">Monto hora extra</th>
                   <th className="n">Costo horas extra</th>
                   <th className="n">Total general del día</th>
                 </tr></thead>
@@ -1261,8 +1269,10 @@ function Semana({ datos, offset, setOffset }) {
                       </td>
                       <td className="n">{d.colaboradores}</td>
                       <td className="n">{hh(d.horas)}</td>
+                      <td className="n" style={{ color: "var(--tinta-2)" }}>{crc(T)}</td>
                       <td className="n">{crc(d.subtotalNormal)}</td>
                       <td className="n" style={{ color: d.horasExtra > 0 ? "var(--alerta)" : undefined }}>{hh(d.horasExtra)}</td>
+                      <td className="n" style={{ color: "var(--tinta-2)" }}>{crc(Math.round(T * FX))}</td>
                       <td className="n" style={{ color: d.costoExtra > 0 ? "var(--alerta)" : undefined }}>{crc(d.costoExtra)}</td>
                       <td className="n" style={{ fontWeight: 600 }}>{crc(d.totalDia)}</td>
                     </tr>
@@ -1271,8 +1281,10 @@ function Semana({ datos, offset, setOffset }) {
                     <td>Gran total</td>
                     <td className="n">{colsPeriodo}</td>
                     <td className="n">{hh(totDiario.horas)}</td>
+                    <td className="n" style={{ color: "var(--tinta-2)" }}>{crc(T)}</td>
                     <td className="n">{crc(totDiario.subtotalNormal)}</td>
                     <td className="n">{hh(totDiario.horasExtra)}</td>
+                    <td className="n" style={{ color: "var(--tinta-2)" }}>{crc(Math.round(T * FX))}</td>
                     <td className="n">{crc(totDiario.costoExtra)}</td>
                     <td className="n" style={{ fontWeight: 700 }}>{crc(totDiario.totalDia)}</td>
                   </tr>
