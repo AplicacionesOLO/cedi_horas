@@ -210,6 +210,13 @@ const sumaDias = (f, n) => { const x = new Date(f); x.setDate(x.getDate()+n); re
 const hoyISO = () => aISO(new Date());
 const fmtCorto = (iso) => { const f = aFecha(iso); return `${String(f.getDate()).padStart(2,"0")}/${String(f.getMonth()+1).padStart(2,"0")}`; };
 const fmtLargo = (iso) => { const f = aFecha(iso); return `${String(f.getDate()).padStart(2,"0")}/${String(f.getMonth()+1).padStart(2,"0")}/${f.getFullYear()}`; };
+// Fecha y hora local a partir de un ISO datetime (para la bitácora).
+const fmtFechaHora = (isoTs) => {
+  const f = new Date(isoTs);
+  if (isNaN(f)) return isoTs || "";
+  const p = (n) => String(n).padStart(2, "0");
+  return `${p(f.getDate())}/${p(f.getMonth()+1)}/${f.getFullYear()} ${p(f.getHours())}:${p(f.getMinutes())}`;
+};
 
 /**
  * Ciclo operativo VIERNES → JUEVES.
@@ -525,7 +532,10 @@ const BASE = {
   colaboradores: [],
   turnos: [],
   presupuestos: {},   // { "2026-08": 4200000 }
+  bitacora: [],       // registro de cambios: [{ id, ts, usuario, rol, accion, entidad, detalle }]
 };
+
+const BITACORA_MAX = 2000;   // tope de entradas conservadas (las más recientes)
 
 /* ════════════════════════════════════════════════════════
    3. DATOS DE EJEMPLO (8 ciclos, para ver tendencias)
@@ -1859,15 +1869,34 @@ function ListaEditable({ titulo, items, onAdd, onDel, placeholder }) {
   );
 }
 
-function Ajustes({ datos, setDatos, avisar, esAdmin = true }) {
+function Ajustes({ datos, setDatos, avisar, esAdmin = true, registrar = () => {} }) {
   const up = (p) => setDatos(d => ({ ...d, ...p }));
   const [confirmar, setConfirmar] = useState(false);
+  const [verBitacora, setVerBitacora] = useState(false);
   const UM = datos.umbralExtra ?? UMBRAL_EXTRA_DEFECTO;
   const FX = datos.factorExtra ?? FACTOR_EXTRA_DEFECTO;
   const mesesPres = useMemo(() => {
     const s = new Set([...Object.keys(datos.presupuestos), ...datos.turnos.map(t => claveMes(t.fecha))]);
     return [...s].sort().reverse();
   }, [datos]);
+
+  // Cambia un parámetro y lo deja anotado en la bitácora (solo si cambió).
+  const cambiarParam = (clave, valor, etiqueta, fmt = (v) => v) => {
+    const anterior = datos[clave];
+    if (anterior === valor) return;
+    up({ [clave]: valor });
+    registrar("Editó", "Ajuste", `${etiqueta}: ${fmt(anterior)} → ${fmt(valor)}`);
+  };
+  // Alta/baja de catálogos con registro en bitácora.
+  const addCat = (clave, etiqueta, v) => {
+    if (datos[clave].includes(v)) return;
+    up({ [clave]: [...new Set([...datos[clave], v])] });
+    registrar("Agregó", etiqueta, v);
+  };
+  const delCat = (clave, etiqueta, v) => {
+    up({ [clave]: datos[clave].filter(x => x !== v) });
+    registrar("Quitó", etiqueta, v);
+  };
 
   /* El operario solo puede administrar colaboradores externos. */
   if (!esAdmin) {
@@ -1877,8 +1906,8 @@ function Ajustes({ datos, setDatos, avisar, esAdmin = true }) {
           <div className="placa-cab"><h2>Colaboradores externos</h2></div>
           <div className="placa-cue">
             <ListaEditable titulo="Colaboradores externos" items={datos.colaboradores} placeholder="Nombre y apellidos"
-              onAdd={v => up({ colaboradores: [...new Set([...datos.colaboradores, v])] })}
-              onDel={v => up({ colaboradores: datos.colaboradores.filter(x => x !== v) })} />
+              onAdd={v => addCat("colaboradores", "Colaborador", v)}
+              onDel={v => delCat("colaboradores", "Colaborador", v)} />
             <p className="kpi-s" style={{ marginTop: 12 }}>
               Como operario podés dar de alta y quitar colaboradores externos. El resto de los ajustes los administra un usuario admin.
             </p>
@@ -1896,10 +1925,10 @@ function Ajustes({ datos, setDatos, avisar, esAdmin = true }) {
           <div className="fila">
             <label className="campo"><span>Tarifa por hora (₡)</span>
               <input type="number" className="num-in" min="0" step="50" value={datos.tarifa}
-                onChange={e => up({ tarifa: Number(e.target.value) || 0 })} />
+                onChange={e => cambiarParam("tarifa", Number(e.target.value) || 0, "Tarifa por hora", crc)} />
             </label>
             <label className="campo"><span>Redondeo del turno</span>
-              <select value={datos.bloqueMin} onChange={e => up({ bloqueMin: Number(e.target.value) })}>
+              <select value={datos.bloqueMin} onChange={e => cambiarParam("bloqueMin", Number(e.target.value), "Redondeo del turno", v => `${v} min`)}>
                 <option value="1">Al minuto exacto</option>
                 <option value="15">Bloques de 15 minutos</option>
                 <option value="30">Bloques de 30 minutos</option>
@@ -1910,11 +1939,11 @@ function Ajustes({ datos, setDatos, avisar, esAdmin = true }) {
           <div className="fila">
             <label className="campo"><span>Horas normales por turno (umbral extra)</span>
               <input type="number" className="num-in" min="0" step="1" value={UM}
-                onChange={e => up({ umbralExtra: Number(e.target.value) || 0 })} />
+                onChange={e => cambiarParam("umbralExtra", Number(e.target.value) || 0, "Umbral horas extra", v => `${v} h`)} />
             </label>
             <label className="campo"><span>Recargo hora extra (×)</span>
               <input type="number" className="num-in" min="1" step="0.1" value={FX}
-                onChange={e => up({ factorExtra: Number(e.target.value) || 1 })} />
+                onChange={e => cambiarParam("factorExtra", Number(e.target.value) || 1, "Recargo hora extra", v => `×${v}`)} />
             </label>
           </div>
           <p className="kpi-s">
@@ -1929,14 +1958,14 @@ function Ajustes({ datos, setDatos, avisar, esAdmin = true }) {
         <div className="placa-cab"><h2>Catálogos</h2></div>
         <div className="placa-cue" style={{ display: "grid", gap: 22 }}>
           <ListaEditable titulo="Departamentos" items={datos.departamentos} placeholder="Ej. Congelados"
-            onAdd={v => up({ departamentos: [...new Set([...datos.departamentos, v])] })}
-            onDel={v => up({ departamentos: datos.departamentos.filter(x => x !== v) })} />
+            onAdd={v => addCat("departamentos", "Departamento", v)}
+            onDel={v => delCat("departamentos", "Departamento", v)} />
           <ListaEditable titulo="Clientes / cuentas" items={datos.clientes} placeholder="Ej. Auto Mercado"
-            onAdd={v => up({ clientes: [...new Set([...datos.clientes, v])] })}
-            onDel={v => up({ clientes: datos.clientes.filter(x => x !== v) })} />
+            onAdd={v => addCat("clientes", "Cliente", v)}
+            onDel={v => delCat("clientes", "Cliente", v)} />
           <ListaEditable titulo="Colaboradores externos" items={datos.colaboradores} placeholder="Nombre y apellidos"
-            onAdd={v => up({ colaboradores: [...new Set([...datos.colaboradores, v])] })}
-            onDel={v => up({ colaboradores: datos.colaboradores.filter(x => x !== v) })} />
+            onAdd={v => addCat("colaboradores", "Colaborador", v)}
+            onDel={v => delCat("colaboradores", "Colaborador", v)} />
         </div>
       </div>
 
@@ -1953,7 +1982,10 @@ function Ajustes({ datos, setDatos, avisar, esAdmin = true }) {
                     <td style={{ fontWeight: 600 }}>{nombreMes(k)}</td>
                     <td className="n"><input type="number" className="num-in" style={{ padding: "6px 8px", textAlign: "right", maxWidth: 160 }}
                       value={datos.presupuestos[k] || ""} placeholder="0"
-                      onChange={e => up({ presupuestos: { ...datos.presupuestos, [k]: Number(e.target.value) || 0 } })} /></td>
+                      data-prev={datos.presupuestos[k] || 0}
+                      onFocus={e => { e.target.dataset.prev = String(datos.presupuestos[k] || 0); }}
+                      onChange={e => up({ presupuestos: { ...datos.presupuestos, [k]: Number(e.target.value) || 0 } })}
+                      onBlur={e => { const v = Number(e.target.value) || 0; const prev = Number(e.target.dataset.prev) || 0; if (v !== prev) registrar("Editó", "Presupuesto", `${nombreMes(k)}: ${crc(prev)} → ${crc(v)}`); }} /></td>
                     <td className="n" style={{ color: datos.presupuestos[k] && gasto > datos.presupuestos[k] ? "var(--alerta)" : undefined }}>{crc(gasto)}</td>
                   </tr>
                 );
@@ -1977,12 +2009,26 @@ function Ajustes({ datos, setDatos, avisar, esAdmin = true }) {
             });
             descargarCSV("cedis_turnos_completo.csv", filas);
           }}>Exportar todo a CSV</button>
-          <button className="btn btn-2 btn-s" onClick={() => { setDatos(datosEjemplo()); avisar("Datos de ejemplo cargados: 9 ciclos de historial"); }}>
+          <button className="btn btn-2 btn-s" onClick={() => {
+            // Conservá la bitácora al cargar los datos de ejemplo.
+            setDatos(d => ({ ...datosEjemplo(), bitacora: d.bitacora || [] }));
+            registrar("Cargó", "Datos", "Datos de ejemplo (9 ciclos de historial)");
+            avisar("Datos de ejemplo cargados: 9 ciclos de historial");
+          }}>
             Cargar datos de ejemplo
           </button>
           {confirmar ? (
             <>
-              <button className="btn btn-peligro btn-s" onClick={() => { setDatos({ ...BASE }); setConfirmar(false); avisar("Se borraron todos los registros"); }}>Sí, borrar todo</button>
+              <button className="btn btn-peligro btn-s" onClick={() => {
+                // Borra todo pero preserva la bitácora y deja constancia del borrado.
+                registrar("Eliminó", "Datos", "Borrado masivo de todos los registros");
+                setDatos(d => ({ ...BASE, bitacora: [
+                  { id: "b" + Date.now(), ts: new Date().toISOString(), usuario: "—", rol: "—",
+                    accion: "Eliminó", entidad: "Datos", detalle: "Borrado masivo de todos los registros" },
+                  ...(d.bitacora || []),
+                ].slice(0, BITACORA_MAX) }));
+                setConfirmar(false); avisar("Se borraron todos los registros");
+              }}>Sí, borrar todo</button>
               <button className="btn btn-2 btn-s" onClick={() => setConfirmar(false)}>Cancelar</button>
             </>
           ) : (
@@ -1990,6 +2036,100 @@ function Ajustes({ datos, setDatos, avisar, esAdmin = true }) {
           )}
         </div>
       </div>
+
+      {/* ── BITÁCORA DE CAMBIOS ── */}
+      <BitacoraPanel datos={datos} setDatos={setDatos} registrar={registrar}
+        abierta={verBitacora} setAbierta={setVerBitacora} />
+    </div>
+  );
+}
+
+/* Vista de bitácora: registros y modificaciones del sistema. */
+function BitacoraPanel({ datos, setDatos, registrar, abierta, setAbierta }) {
+  const [confirmar, setConfirmar] = useState(false);
+  const [fAccion, setFAccion] = useState("");   // filtro por tipo de acción
+  const [busca, setBusca] = useState("");
+  const log = datos.bitacora || [];
+
+  const acciones = useMemo(() => [...new Set(log.map(e => e.accion))].sort(), [log]);
+  const filtrada = useMemo(() => {
+    const q = busca.trim().toLowerCase();
+    return log.filter(e =>
+      (!fAccion || e.accion === fAccion) &&
+      (!q || `${e.usuario} ${e.accion} ${e.entidad} ${e.detalle}`.toLowerCase().includes(q))
+    );
+  }, [log, fAccion, busca]);
+
+  const exportar = () => {
+    const filas = [["Fecha y hora", "Usuario", "Rol", "Acción", "Entidad", "Detalle"]];
+    filtrada.forEach(e => filas.push([fmtFechaHora(e.ts), e.usuario, e.rol, e.accion, e.entidad, e.detalle]));
+    descargarCSV(`bitacora_${hoyISO()}.csv`, filas);
+  };
+  const limpiar = () => {
+    setDatos(d => ({ ...d, bitacora: [] }));
+    setConfirmar(false);
+    registrar("Limpió", "Bitácora", "Se vació la bitácora de cambios");
+  };
+
+  return (
+    <div className="placa">
+      <div className="placa-cab" style={{ gap: 10, flexWrap: "wrap" }}>
+        <h2>Bitácora de cambios · registros y modificaciones</h2>
+        <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+          <span className="kpi-s">{log.length} evento{log.length === 1 ? "" : "s"}</span>
+          <button className="btn btn-2 btn-s" onClick={() => setAbierta(a => !a)}>{abierta ? "Ocultar" : "Ver bitácora"}</button>
+        </div>
+      </div>
+
+      {abierta && (
+        <>
+          <div className="placa-cue" style={{ display: "flex", gap: 12, alignItems: "flex-end", flexWrap: "wrap", paddingBottom: 0 }}>
+            <label className="campo" style={{ margin: 0, minWidth: 160 }}><span>Tipo de acción</span>
+              <select value={fAccion} onChange={e => setFAccion(e.target.value)}>
+                <option value="">Todas</option>
+                {acciones.map(a => <option key={a} value={a}>{a}</option>)}
+              </select>
+            </label>
+            <label className="campo" style={{ margin: 0, minWidth: 200, flex: "1 1 200px" }}><span>Buscar</span>
+              <input placeholder="Usuario, entidad, detalle…" value={busca} onChange={e => setBusca(e.target.value)} />
+            </label>
+            <button className="btn btn-2 btn-s" onClick={exportar} disabled={!filtrada.length}>Descargar CSV</button>
+            {confirmar ? (
+              <>
+                <button className="btn btn-peligro btn-s" onClick={limpiar}>Sí, limpiar</button>
+                <button className="btn btn-2 btn-s" onClick={() => setConfirmar(false)}>Cancelar</button>
+              </>
+            ) : (
+              <button className="btn btn-peligro btn-s" onClick={() => setConfirmar(true)} disabled={!log.length}>Limpiar bitácora</button>
+            )}
+          </div>
+
+          {!filtrada.length ? (
+            <div className="vacio"><p>{log.length ? "Ningún evento coincide con el filtro." : "Todavía no hay eventos registrados. Aparecerán acá los registros y modificaciones."}</p></div>
+          ) : (
+            <div className="tabla-env">
+              <table>
+                <thead><tr>
+                  <th>Fecha y hora</th><th>Usuario</th><th>Rol</th><th>Acción</th><th>Entidad</th><th>Detalle</th>
+                </tr></thead>
+                <tbody>
+                  {filtrada.slice(0, 300).map(e => (
+                    <tr key={e.id}>
+                      <td className="n" style={{ whiteSpace: "nowrap" }}>{fmtFechaHora(e.ts)}</td>
+                      <td>{e.usuario}</td>
+                      <td><span className={"rol-pill" + (e.rol === "admin" ? " admin" : "")}>{e.rol}</span></td>
+                      <td style={{ fontWeight: 600 }}>{e.accion}</td>
+                      <td>{e.entidad}</td>
+                      <td style={{ color: "var(--tinta-2)" }}>{e.detalle}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+              {filtrada.length > 300 && <p className="kpi-s" style={{ padding: "10px 14px" }}>Mostrando los 300 más recientes. Descargá el CSV para ver todos ({filtrada.length}).</p>}
+            </div>
+          )}
+        </>
+      )}
     </div>
   );
 }
@@ -2311,14 +2451,48 @@ export default function App() {
 
   const avisar = (m) => { setToast(m); setTimeout(() => setToast(null), 4600); };
 
-  const guardarTurno = (t) => setDatos(d => ({
-    ...d,
-    colaboradores: [...new Set([...d.colaboradores, t.colaborador])].sort(),
-    clientes: [...new Set([...d.clientes, t.cliente, ...(t.clienteExtra ? [t.clienteExtra] : [])])],
-    turnos: d.turnos.some(x => x.id === t.id) ? d.turnos.map(x => x.id === t.id ? t : x) : [...d.turnos, t],
-  }));
-  const borrarTurno = (id) => { setDatos(d => ({ ...d, turnos: d.turnos.filter(t => t.id !== id) })); avisar("Turno eliminado"); };
-  const setPresupuesto = (mes, monto) => setDatos(d => ({ ...d, presupuestos: { ...d.presupuestos, [mes]: monto } }));
+  // Mantené el perfil actual accesible dentro de los closures de mutación.
+  const perfilRef = useRef(perfil);
+  useEffect(() => { perfilRef.current = perfil; }, [perfil]);
+
+  /* — BITÁCORA: agrega una entrada de auditoría al estado — */
+  const registrar = (accion, entidad, detalle) => {
+    const p = perfilRef.current;
+    const entrada = {
+      id: "b" + Date.now() + Math.random().toString(36).slice(2, 6),
+      ts: new Date().toISOString(),
+      usuario: p ? (p.nombre || p.correo || "—") : "—",
+      rol: p ? (p.es_admin ? "admin" : "operario") : "—",
+      accion, entidad: entidad || "", detalle: detalle || "",
+    };
+    setDatos(d => ({ ...d, bitacora: [entrada, ...(d.bitacora || [])].slice(0, BITACORA_MAX) }));
+  };
+
+  const guardarTurno = (t) => {
+    const existe = datos.turnos.some(x => x.id === t.id);
+    setDatos(d => ({
+      ...d,
+      colaboradores: [...new Set([...d.colaboradores, t.colaborador])].sort(),
+      clientes: [...new Set([...d.clientes, t.cliente, ...(t.clienteExtra ? [t.clienteExtra] : [])])],
+      turnos: d.turnos.some(x => x.id === t.id) ? d.turnos.map(x => x.id === t.id ? t : x) : [...d.turnos, t],
+    }));
+    const h = horasTurno(t.entrada, t.salida, t.descansoMin, datos.bloqueMin);
+    const extraMsg = t.clienteExtra && t.clienteExtra !== t.cliente ? ` · extra a ${t.clienteExtra}` : "";
+    registrar(existe ? "Editó" : "Creó", "Turno",
+      `${fmtLargo(t.fecha)} · ${t.colaborador} · ${t.departamento} · ${t.cliente} · ${hh(h)} h${extraMsg}`);
+  };
+  const borrarTurno = (id) => {
+    const t = datos.turnos.find(x => x.id === id);
+    setDatos(d => ({ ...d, turnos: d.turnos.filter(t => t.id !== id) }));
+    avisar("Turno eliminado");
+    if (t) registrar("Eliminó", "Turno", `${fmtLargo(t.fecha)} · ${t.colaborador} · ${t.departamento} · ${t.cliente}`);
+    else registrar("Eliminó", "Turno", `id ${id}`);
+  };
+  const setPresupuesto = (mes, monto) => {
+    const anterior = datos.presupuestos[mes] || 0;
+    setDatos(d => ({ ...d, presupuestos: { ...d.presupuestos, [mes]: monto } }));
+    if (anterior !== monto) registrar("Editó", "Presupuesto", `${nombreMes(mes)}: ${crc(anterior)} → ${crc(monto)}`);
+  };
 
   const cicloHoy = ciclo(new Date(), 0);
   const turnosCiclo = datos.turnos.filter(t => enRango(t.fecha, cicloHoy));
@@ -2388,7 +2562,7 @@ export default function App() {
       {tab === "semana"    && <Semana datos={datos} offset={offset} setOffset={setOffset} />}
       {tab === "embarques" && <Embarques datos={datos} />}
       {tab === "tablero"   && <Tablero datos={datos} setPresupuesto={setPresupuesto} />}
-      {tab === "ajustes"  && <Ajustes datos={datos} setDatos={setDatos} avisar={avisar} esAdmin={esAdmin} />}
+      {tab === "ajustes"  && <Ajustes datos={datos} setDatos={setDatos} avisar={avisar} esAdmin={esAdmin} registrar={registrar} />}
 
       {toast && <div className="toast"><span className="sello">OK</span>{toast}</div>}
 
