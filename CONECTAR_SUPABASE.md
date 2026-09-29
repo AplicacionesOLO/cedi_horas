@@ -19,6 +19,7 @@ Así, los datos ya no viven solo en el navegador: viven en Supabase y se compart
 |---|---|
 | `supabse/app_estado.sql` | ✅ **Corré 1º.** Crea la tabla que guarda el estado JSON del frontend. |
 | `supabse/roles.sql` | ✅ **Corré 2º.** Login + roles (`usuarios`, `roles`, `usuarios_roles`) y cierra `app_estado` para que exija sesión. |
+| `supabse/usuarios.sql` | ✅ **Corré 3º.** Módulo de usuarios: RPC `listar_usuarios` y `asignar_rol` para el CRUD de la pestaña **Usuarios**. |
 | `supabse/supabase_migracion.sql` | Modelo normalizado avanzado (tablas + RPC). Opcional, no hace falta para que corra. |
 | `supabse/esquema.sql` | ⚠️ Versión para Postgres propio + Express. **NO lo corras en Supabase.** |
 | `out/supabase-config.js` | Tu URL y anon key. |

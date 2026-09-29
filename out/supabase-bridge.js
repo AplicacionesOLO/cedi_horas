@@ -58,6 +58,43 @@
     },
   };
 
+  /* ───────────────────────────────────────────────────────────
+     window.oloUsuarios — administración de usuarios (solo admin por RLS).
+     Crear/eliminar cuentas de Auth requiere la service_role key (backend),
+     por eso desde el navegador se administran perfil, estado y rol.
+     Correr antes el SQL: supabse/usuarios.sql
+     ─────────────────────────────────────────────────────────── */
+  window.oloUsuarios = {
+    // Lista de usuarios con su rol (usa la RPC listar_usuarios).
+    async listar() {
+      var r = await client.rpc("listar_usuarios");
+      if (r.error) throw r.error;
+      return r.data || [];
+    },
+    // Catálogo de roles disponibles.
+    async roles() {
+      var r = await client.from("roles").select("id,clave,descripcion").order("id");
+      if (r.error) throw r.error;
+      return r.data || [];
+    },
+    // Actualiza nombre y/o estado activo de un usuario.
+    async actualizar(id, cambios) {
+      var r = await client.from("usuarios").update(cambios).eq("id", id);
+      if (r.error) throw r.error;
+      return true;
+    },
+    // Asigna un rol único al usuario (reemplaza los que tenga).
+    async asignarRol(id, claveRol) {
+      var r = await client.rpc("asignar_rol", { p_usuario: id, p_rol: claveRol });
+      if (r.error) throw r.error;
+      return true;
+    },
+    // Desactiva (baja lógica) — no borra la cuenta de Auth.
+    async desactivar(id) {
+      return this.actualizar(id, { activo: false });
+    },
+  };
+
   /* Atajos a las funciones RPC de la base (ver CONECTAR_SUPABASE.md, paso 3). */
   window.oloApi = {
     registrarTurno: function (args) {

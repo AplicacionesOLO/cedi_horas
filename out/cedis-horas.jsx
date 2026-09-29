@@ -314,6 +314,33 @@ function desgloseTurnoCliente(t, tarifa, bloqueMin = 1, umbral = UMBRAL_EXTRA_DE
   };
 }
 
+/** ¿El turno tiene algo atribuible a `cliente`? (cliente normal o cliente extra) */
+function turnoTocaCliente(t, cliente) {
+  if (!cliente) return true;
+  if (t.cliente === cliente) return true;
+  const h = horasTurno(t.entrada, t.salida, t.descansoMin || 0);
+  const { extra } = desgloseHoras(h);
+  return extra > 0 && (t.clienteExtra || "").trim() === cliente;
+}
+
+/**
+ * Horas y costo ATRIBUIBLES a un cliente dentro de un turno.
+ * - Si `cliente` está vacío: todo el turno.
+ * - Si el turno es normal=cliente: la parte normal (y la extra solo si el extra también es ese cliente).
+ * - Si el turno tiene extra=cliente (distinto al normal): solo la parte extra.
+ * Garantiza que Embarques y Tablero cuenten lo mismo al filtrar por un cliente.
+ */
+function atribuibleACliente(t, cliente, tarifa, bloqueMin = 1, umbral = UMBRAL_EXTRA_DEFECTO, factor = FACTOR_EXTRA_DEFECTO) {
+  const d = desgloseTurnoCliente(t, tarifa, bloqueMin, umbral, factor);
+  if (!cliente) {
+    return { horas: d.horasNormales + d.horasExtra, costo: d.costoNormal + d.costoExtra };
+  }
+  let horas = 0, costo = 0;
+  if (d.clienteNormal === cliente) { horas += d.horasNormales; costo += d.costoNormal; }
+  if (d.horasExtra > 0 && d.clienteExtra === cliente) { horas += d.horasExtra; costo += d.costoExtra; }
+  return { horas: Math.round(horas * 100) / 100, costo: Math.round(costo) };
+}
+
 /**
  * Reparte las horas de un turno entre sus embarques.
  * - Si el embarque tiene `horas` cargadas, se respetan.
@@ -345,12 +372,13 @@ function horasPorEmbarque(turno, bloqueMin = 1) {
  * hora extra, ese recargo se prorratea entre los embarques que atendió.
  * Devuelve filas ordenadas por costo descendente.
  */
-function costoPorEmbarque(turnos, tarifa, bloqueMin = 1, umbral = UMBRAL_EXTRA_DEFECTO, factor = FACTOR_EXTRA_DEFECTO) {
+function costoPorEmbarque(turnos, tarifa, bloqueMin = 1, umbral = UMBRAL_EXTRA_DEFECTO, factor = FACTOR_EXTRA_DEFECTO, cliente = "") {
   const m = new Map();
   turnos.forEach(t => {
     const reparto = horasPorEmbarque(t, bloqueMin);
     const totH = reparto.reduce((s, e) => s + e.horas, 0);
-    const costoT = costoDeTurno(t, tarifa, bloqueMin, umbral, factor);   // costo del turno con extra
+    // Costo atribuible al cliente filtrado (o todo el turno si no hay filtro).
+    const costoT = atribuibleACliente(t, cliente, tarifa, bloqueMin, umbral, factor).costo;
     reparto.forEach(({ codigo, horas }) => {
       const costo = totH > 0 ? (costoT * horas) / totH : 0;   // prorrateo por horas
       const a = m.get(codigo) || {
@@ -716,30 +744,39 @@ function descargarCSV(nombre, filas) {
    Excel lo abre nativo, con columnas separadas y números como números. */
 function descargarExcel(nombreArchivo, hojas) {
   const esc = (s) => String(s ?? "")
-    .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+    .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;").replace(/'/g, "&apos;");
   const celda = (v, esEncabezado) => {
     const num = typeof v === "number" && isFinite(v);
     const tipo = num ? "Number" : "String";
+    const valor = num ? v : esc(v);
     const estilo = esEncabezado ? ' ss:StyleID="hd"' : "";
-    return `<Cell${estilo}><Data ss:Type="${tipo}">${esc(v)}</Data></Cell>`;
+    return `<Cell${estilo}><Data ss:Type="${tipo}">${valor}</Data></Cell>`;
   };
   const hojaXml = (h) => {
     const filas = (h.filas || []).map((fila, i) =>
       `<Row>${fila.map(c => celda(c, i === 0)).join("")}</Row>`).join("");
-    const nombre = esc((h.nombre || "Hoja").slice(0, 31)).replace(/[\\/?*\[\]:]/g, " ");
+    // Nombre de hoja válido: sin caracteres prohibidos, máx. 31, no vacío.
+    const nombre = esc((h.nombre || "Hoja").replace(/[\\/?*\[\]:]/g, " ").slice(0, 31) || "Hoja");
     return `<Worksheet ss:Name="${nombre}"><Table>${filas}</Table></Worksheet>`;
   };
+  // SpreadsheetML 2003 válido: un solo <Font> por estilo (dos <Font> corrompen el archivo).
   const xml =
-    '<?xml version="1.0" encoding="UTF-8"?>' +
+    '<?xml version="1.0"?>' +
     '<?mso-application progid="Excel.Sheet"?>' +
-    '<Workbook xmlns="urn:schemas-microsoft-com:office:spreadsheet" ' +
-    'xmlns:ss="urn:schemas-microsoft-com:office:spreadsheet">' +
-    '<Styles><Style ss:ID="hd"><Font ss:Bold="1"/>' +
+    '<Workbook xmlns="urn:schemas-microsoft-com:office:spreadsheet"' +
+    ' xmlns:ss="urn:schemas-microsoft-com:office:spreadsheet">' +
+    '<Styles>' +
+    '<Style ss:ID="Default" ss:Name="Normal"><Alignment ss:Vertical="Bottom"/></Style>' +
+    '<Style ss:ID="hd">' +
+    '<Font ss:Bold="1" ss:Color="#FFFFFF"/>' +
     '<Interior ss:Color="#251E1F" ss:Pattern="Solid"/>' +
-    '<Font ss:Color="#FFFFFF" ss:Bold="1"/></Style></Styles>' +
+    '</Style>' +
+    '</Styles>' +
     (hojas || []).map(hojaXml).join("") +
     '</Workbook>';
-  const url = URL.createObjectURL(new Blob(["\uFEFF" + xml], { type: "application/vnd.ms-excel;charset=utf-8;" }));
+  // Sin BOM: el prólogo XML ya declara la codificación; el BOM antes del <?xml?> corrompe el .xls.
+  const url = URL.createObjectURL(new Blob([xml], { type: "application/vnd.ms-excel;charset=utf-8;" }));
   const a = document.createElement("a");
   a.href = url; a.download = nombreArchivo.endsWith(".xls") ? nombreArchivo : nombreArchivo + ".xls";
   a.click();
@@ -1458,11 +1495,17 @@ function Tablero({ datos, setPresupuesto }) {
 
   const turnos = useMemo(() =>
     datos.turnos.filter(t =>
-      (!fCliente || t.cliente === fCliente) &&
+      turnoTocaCliente(t, fCliente) &&
       (!fDepto || t.departamento === fDepto)),
     [datos.turnos, fCliente, fDepto]);
 
   const hayFiltro = !!(fCliente || fDepto);
+
+  // Horas/costo atribuibles al filtro de cliente (si no hay filtro, todo el turno).
+  const hAtrib = (t) => atribuibleACliente(t, fCliente, T, datos.bloqueMin, UM, FX).horas;
+  const cAtrib = (t) => atribuibleACliente(t, fCliente, T, datos.bloqueMin, UM, FX).costo;
+  const sumaHAtrib = (ts) => Math.round(ts.reduce((s,t) => s + hAtrib(t), 0) * 100) / 100;
+  const sumaCAtrib = (ts) => ts.reduce((s,t) => s + cAtrib(t), 0);
 
   /* — serie por ciclo Vie→Jue (12 ciclos hacia atrás, sin incluir el abierto) — */
   const serie = useMemo(() => {
@@ -1470,13 +1513,12 @@ function Tablero({ datos, setPresupuesto }) {
     for (let i = 12; i >= 1; i--) {
       const c = ciclo(new Date(), -i);
       const ts = turnos.filter(t => enRango(t.fecha, c));
-      const h = ts.reduce((s,t) => s + horasTurno(t.entrada, t.salida, t.descansoMin), 0);
-      out.push({ etiqueta: c.etiqueta, inicio: c.inicio, horas: Math.round(h*100)/100,
-                 costo: costoTurnos(ts, T, datos.bloqueMin, UM, FX),
+      out.push({ etiqueta: c.etiqueta, inicio: c.inicio, horas: sumaHAtrib(ts),
+                 costo: sumaCAtrib(ts),
                  personas: new Set(ts.map(t => t.colaborador)).size });
     }
     return out;
-  }, [turnos, T, UM, FX]);
+  }, [turnos, T, UM, FX, fCliente]);
 
   const conDatos = serie.filter(s => s.horas > 0);
   const ventana = conDatos.slice(-semanasBase);
@@ -1501,20 +1543,20 @@ function Tablero({ datos, setPresupuesto }) {
     const m = new Map();
     turnos.forEach(t => {
       const k = claveMes(t.fecha);
-      const h = horasTurno(t.entrada, t.salida, t.descansoMin);
+      const at = atribuibleACliente(t, fCliente, T, datos.bloqueMin, UM, FX);
       const a = m.get(k) || { k, horas: 0, costo: 0 };
-      a.horas += h; a.costo += costoDeTurno(t, T, datos.bloqueMin, UM, FX); m.set(k, a);
+      a.horas += at.horas; a.costo += at.costo; m.set(k, a);
     });
     return [...m.values()].sort((a,b) => a.k.localeCompare(b.k)).slice(-12)
       .map(x => ({ ...x, horas: Math.round(x.horas*100)/100, costo: Math.round(x.costo),
                    etiqueta: nombreMes(x.k), presupuesto: datos.presupuestos[x.k] || 0 }));
-  }, [turnos, datos.presupuestos, T, UM, FX]);
+  }, [turnos, datos.presupuestos, T, UM, FX, fCliente]);
 
   /* — presupuesto del mes seleccionado — */
   const [mesSel, setMesSel] = useState(claveMes(hoyISO()));
   const presupuesto = datos.presupuestos[mesSel] || 0;
-  const gastoMes = useMemo(() => costoTurnos(turnos.filter(t => claveMes(t.fecha) === mesSel), T, datos.bloqueMin, UM, FX),
-    [turnos, mesSel, T, UM, FX]);
+  const gastoMes = useMemo(() => sumaCAtrib(turnos.filter(t => claveMes(t.fecha) === mesSel)),
+    [turnos, mesSel, T, UM, FX, fCliente]);
   const esMesActual = mesSel === claveMes(hoyISO());
   const ej = ejecucion(gastoMes, presupuesto, esMesActual ? new Date() : new Date(Number(mesSel.slice(0,4)), Number(mesSel.slice(5,7)), 0));
   const opcionesMes = useMemo(() => {
@@ -1523,19 +1565,22 @@ function Tablero({ datos, setPresupuesto }) {
   }, [datos.presupuestos, datos.turnos]);
 
   const turnosAnio = turnos.filter(t => t.fecha.startsWith(hoyISO().slice(0,4)));
-  const anioHoras = turnosAnio.reduce((s,t) => s + horasTurno(t.entrada, t.salida, t.descansoMin), 0);
-  const anioCosto = costoTurnos(turnosAnio, T, datos.bloqueMin, UM, FX);
+  const anioHoras = sumaHAtrib(turnosAnio);
+  const anioCosto = sumaCAtrib(turnosAnio);
 
-  /* — reportes agregados (respetan los filtros) — */
+  /* — reportes agregados (respetan los filtros; costo/horas atribuibles al cliente filtrado) — */
   const agrupar = (campo) => {
     const m = new Map();
     turnos.forEach(t => {
       const clave = t[campo] || "(sin dato)";
-      const h = horasTurno(t.entrada, t.salida, t.descansoMin);
-      const { extra } = desgloseHoras(h, UM);
+      const at = atribuibleACliente(t, fCliente, T, datos.bloqueMin, UM, FX);
+      if (at.horas <= 0 && at.costo <= 0) return;   // el turno no aporta a este cliente
+      // Horas extra atribuibles (solo si el filtro incluye la parte extra).
+      const d = desgloseTurnoCliente(t, T, datos.bloqueMin, UM, FX);
+      const extraAtrib = !fCliente ? d.horasExtra : (d.clienteExtra === fCliente ? d.horasExtra : 0);
       const a = m.get(clave) || { nombre: clave, turnos: 0, horas: 0, extra: 0, costo: 0, personas: new Set() };
-      a.turnos += 1; a.horas += h; a.extra += extra;
-      a.costo += costoTurno(h, T, UM, FX); a.personas.add(t.colaborador);
+      a.turnos += 1; a.horas += at.horas; a.extra += extraAtrib;
+      a.costo += at.costo; a.personas.add(t.colaborador);
       m.set(clave, a);
     });
     return [...m.values()]
@@ -1544,9 +1589,10 @@ function Tablero({ datos, setPresupuesto }) {
       .sort((a,b) => b.costo - a.costo);
   };
   // Por cliente: el costo/horas extra se atribuyen al clienteExtra si difiere.
+  // Si hay filtro de cliente, solo esa fila (con lo atribuible).
   const repCliente = useMemo(() => {
-    const base = agruparPorCliente(turnos, T, UM, FX, datos.bloqueMin);
-    // Aportar el conteo de personas por cliente (normal + extra).
+    const base = agruparPorCliente(turnos, T, UM, FX, datos.bloqueMin)
+      .filter(x => !fCliente || x.nombre === fCliente);
     const pers = new Map();
     turnos.forEach(t => {
       const d = desgloseTurnoCliente(t, T, datos.bloqueMin, UM, FX);
@@ -1555,13 +1601,16 @@ function Tablero({ datos, setPresupuesto }) {
         (pers.get(d.clienteExtra) || pers.set(d.clienteExtra, new Set()).get(d.clienteExtra)).add(t.colaborador);
     });
     return base.map(x => ({ ...x, personas: (pers.get(x.nombre) || new Set()).size }));
-  }, [turnos, T, UM, FX, datos.bloqueMin]);
-  const repDepto = useMemo(() => agrupar("departamento"), [turnos, T, UM, FX]);
-  const repColaborador = useMemo(() => agrupar("colaborador"), [turnos, T, UM, FX]);
+  }, [turnos, T, UM, FX, datos.bloqueMin, fCliente]);
+  const repDepto = useMemo(() => agrupar("departamento"), [turnos, T, UM, FX, fCliente]);
+  const repColaborador = useMemo(() => agrupar("colaborador"), [turnos, T, UM, FX, fCliente]);
 
-  const totHoras = turnos.reduce((s,t) => s + horasTurno(t.entrada, t.salida, t.descansoMin), 0);
-  const totExtra = horasExtraTurnos(turnos, datos.bloqueMin, UM);
-  const totCosto = costoTurnos(turnos, T, datos.bloqueMin, UM, FX);
+  const totHoras = sumaHAtrib(turnos);
+  const totExtra = Math.round(turnos.reduce((s,t) => {
+    const d = desgloseTurnoCliente(t, T, datos.bloqueMin, UM, FX);
+    return s + (!fCliente ? d.horasExtra : (d.clienteExtra === fCliente ? d.horasExtra : 0));
+  }, 0) * 100) / 100;
+  const totCosto = sumaCAtrib(turnos);
 
   const filasReporte = (rep, etiqueta) => [
     [etiqueta, "Turnos", "Personas", "Horas", "Horas extra", "Costo ₡"],
@@ -2164,18 +2213,18 @@ function Embarques({ datos }) {
     setHasta(fechas.reduce((a,b) => a > b ? a : b));
   };
 
-  // Turnos dentro del rango y del cliente elegido.
+  // Turnos dentro del rango y atribuibles al cliente elegido (normal o extra).
   const turnosRango = useMemo(() => datos.turnos.filter(t =>
     (!desde || t.fecha >= desde) && (!hasta || t.fecha <= hasta) &&
-    (!fCliente || t.cliente === fCliente)
+    turnoTocaCliente(t, fCliente)
   ), [datos.turnos, desde, hasta, fCliente]);
 
-  // Costo agregado por embarque, luego filtrado por texto de búsqueda.
+  // Costo agregado por embarque (atribuible al cliente), luego filtrado por texto.
   const reporte = useMemo(() => {
-    const filas = costoPorEmbarque(turnosRango, T, bloque, UM, FX);
+    const filas = costoPorEmbarque(turnosRango, T, bloque, UM, FX, fCliente);
     const q = busca.trim().toUpperCase();
     return q ? filas.filter(f => f.codigo.includes(q)) : filas;
-  }, [turnosRango, T, bloque, UM, FX, busca]);
+  }, [turnosRango, T, bloque, UM, FX, busca, fCliente]);
 
   const totHoras = reporte.reduce((s, r) => s + r.horas, 0);
   const totCosto = reporte.reduce((s, r) => s + r.costo, 0);
@@ -2200,7 +2249,7 @@ function Embarques({ datos }) {
       .forEach(t => {
         const reparto = horasPorEmbarque(t, bloque);
         const totH = reparto.reduce((s, e) => s + e.horas, 0);
-        const costoT = costoDeTurno(t, T, bloque, UM, FX);
+        const costoT = atribuibleACliente(t, fCliente, T, bloque, UM, FX).costo;
         reparto.forEach(({ codigo, horas }) => {
           if (busca.trim() && !codigo.includes(busca.trim().toUpperCase())) return;
           const costo = totH > 0 ? Math.round((costoT * horas) / totH) : 0;
@@ -2313,6 +2362,146 @@ function Embarques({ datos }) {
 }
 
 /* ════════════════════════════════════════════════════════
+   8c. PANTALLA · USUARIOS DEL SISTEMA (CRUD, solo admin)
+   Lista, edita nombre/estado y cambia el rol. Crear/eliminar
+   cuentas de acceso se hace en Supabase → Authentication.
+   ════════════════════════════════════════════════════════ */
+
+function Usuarios({ registrar = () => {} }) {
+  const [lista, setLista] = useState(null);   // null = cargando
+  const [roles, setRoles] = useState([]);
+  const [error, setError] = useState("");
+  const [busca, setBusca] = useState("");
+  const [edit, setEdit] = useState(null);     // { id, nombre, activo, rol }
+  const [guardando, setGuardando] = useState(false);
+  const api = (typeof window !== "undefined" && window.oloUsuarios) || null;
+
+  const cargar = async () => {
+    setError("");
+    if (!api) { setError("No se cargó la administración de usuarios (revisá supabase-bridge.js y corré supabse/usuarios.sql)."); setLista([]); return; }
+    try {
+      const [us, rs] = await Promise.all([api.listar(), api.roles()]);
+      setLista(us); setRoles(rs);
+    } catch (e) {
+      setError((e && e.message) || "No se pudo cargar la lista de usuarios.");
+      setLista([]);
+    }
+  };
+  useEffect(() => { cargar(); }, []);
+
+  const abrirEdicion = (u) => setEdit({ id: u.id, nombre: u.nombre || "", activo: !!u.activo, rol: u.rol });
+  const guardar = async () => {
+    if (!edit || !api) return;
+    setGuardando(true); setError("");
+    try {
+      const orig = lista.find(u => u.id === edit.id) || {};
+      await api.actualizar(edit.id, { nombre: edit.nombre.trim(), activo: edit.activo });
+      if (edit.rol && edit.rol !== orig.rol) await api.asignarRol(edit.id, edit.rol);
+      const cambios = [];
+      if ((orig.nombre || "") !== edit.nombre.trim()) cambios.push(`nombre → ${edit.nombre.trim()}`);
+      if (!!orig.activo !== edit.activo) cambios.push(edit.activo ? "activado" : "desactivado");
+      if (edit.rol !== orig.rol) cambios.push(`rol → ${edit.rol}`);
+      registrar("Editó", "Usuario", `${orig.correo || edit.id}: ${cambios.join(", ") || "sin cambios"}`);
+      setEdit(null);
+      await cargar();
+    } catch (e) {
+      setError((e && e.message) || "No se pudo guardar. ¿Tenés rol admin?");
+    } finally {
+      setGuardando(false);
+    }
+  };
+
+  const filtrada = (lista || []).filter(u => {
+    const q = busca.trim().toLowerCase();
+    return !q || `${u.nombre} ${u.correo} ${u.rol}`.toLowerCase().includes(q);
+  });
+
+  return (
+    <div className="marco">
+      <div className="placa" style={{ marginTop: 14 }}>
+        <div className="placa-cab" style={{ gap: 10, flexWrap: "wrap" }}>
+          <h2>Usuarios del sistema</h2>
+          <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+            <input placeholder="Buscar nombre, correo o rol…" value={busca}
+              onChange={e => setBusca(e.target.value)} style={{ width: "auto", padding: "7px 10px", fontSize: 14 }} />
+            <button className="btn btn-2 btn-s" onClick={cargar}>Actualizar</button>
+          </div>
+        </div>
+        <div className="placa-cue" style={{ paddingBottom: 0 }}>
+          <div className="aviso">
+            Las cuentas de acceso (correo y contraseña) se crean en <strong>Supabase → Authentication → Users</strong>.
+            Acá administrás el <strong>nombre</strong>, el <strong>estado</strong> (activo/inactivo) y el <strong>rol</strong>.
+            Un usuario inactivo pierde acceso al sistema.
+          </div>
+          {error && <div className="aviso rojo" style={{ marginTop: 12 }}>{error}</div>}
+        </div>
+
+        {lista === null ? (
+          <div className="vacio"><p>Cargando usuarios…</p></div>
+        ) : !filtrada.length ? (
+          <div className="vacio"><p>{(lista || []).length ? "Ningún usuario coincide con la búsqueda." : "No hay usuarios para mostrar (¿tenés rol admin y corriste supabse/usuarios.sql?)."}</p></div>
+        ) : (
+          <div className="tabla-env">
+            <table>
+              <thead><tr>
+                <th>Nombre</th><th>Correo</th><th>Rol</th><th>Estado</th><th></th>
+              </tr></thead>
+              <tbody>
+                {filtrada.map(u => (
+                  <tr key={u.id}>
+                    <td style={{ fontWeight: 600 }}>{u.nombre || <span style={{ color: "var(--tinta-3)" }}>—</span>}</td>
+                    <td style={{ color: "var(--tinta-2)" }}>{u.correo}</td>
+                    <td><span className={"rol-pill" + (u.rol === "admin" ? " admin" : "")}>{u.rol}</span></td>
+                    <td>{u.activo
+                      ? <span style={{ color: "var(--ok)" }}>Activo</span>
+                      : <span style={{ color: "var(--alerta)" }}>Inactivo</span>}</td>
+                    <td style={{ whiteSpace: "nowrap" }}>
+                      <button className="lig" onClick={() => abrirEdicion(u)}>Editar</button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+
+      {edit && (
+        <div className="placa">
+          <div className="placa-cab">
+            <h2>Editar usuario</h2>
+            <button className="lig" onClick={() => setEdit(null)}>Cancelar</button>
+          </div>
+          <div className="placa-cue">
+            <label className="campo"><span>Nombre</span>
+              <input value={edit.nombre} onChange={e => setEdit(p => ({ ...p, nombre: e.target.value }))}
+                placeholder="Nombre y apellidos" />
+            </label>
+            <div className="fila">
+              <label className="campo"><span>Rol</span>
+                <select value={edit.rol} onChange={e => setEdit(p => ({ ...p, rol: e.target.value }))}>
+                  {roles.map(r => <option key={r.clave} value={r.clave}>{r.clave}</option>)}
+                  {!roles.some(r => r.clave === edit.rol) && <option value={edit.rol}>{edit.rol}</option>}
+                </select>
+              </label>
+              <label className="campo"><span>Estado</span>
+                <select value={edit.activo ? "1" : "0"} onChange={e => setEdit(p => ({ ...p, activo: e.target.value === "1" }))}>
+                  <option value="1">Activo</option>
+                  <option value="0">Inactivo</option>
+                </select>
+              </label>
+            </div>
+            <button className="btn btn-senal" onClick={guardar} disabled={guardando} style={{ width: "100%" }}>
+              {guardando ? "Guardando…" : "Guardar cambios"}
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ════════════════════════════════════════════════════════
    9. LOGIN (autenticación de Supabase)
    ════════════════════════════════════════════════════════ */
 
@@ -2376,6 +2565,7 @@ const PESTANAS = [
   { id: "semana",    rot: "Semana" },
   { id: "embarques", rot: "Embarques" },
   { id: "tablero",   rot: "Tablero" },
+  { id: "usuarios",  rot: "Usuarios", soloAdmin: true },
   { id: "ajustes",   rot: "Ajustes" },
 ];
 
@@ -2562,12 +2752,13 @@ export default function App() {
       {tab === "semana"    && <Semana datos={datos} offset={offset} setOffset={setOffset} />}
       {tab === "embarques" && <Embarques datos={datos} />}
       {tab === "tablero"   && <Tablero datos={datos} setPresupuesto={setPresupuesto} />}
+      {tab === "usuarios"  && esAdmin && <Usuarios registrar={registrar} />}
       {tab === "ajustes"  && <Ajustes datos={datos} setDatos={setDatos} avisar={avisar} esAdmin={esAdmin} registrar={registrar} />}
 
       {toast && <div className="toast"><span className="sello">OK</span>{toast}</div>}
 
       <nav className="nav">
-        {PESTANAS.map(p => (
+        {PESTANAS.filter(p => !p.soloAdmin || esAdmin).map(p => (
           <button key={p.id} aria-current={tab === p.id ? "page" : undefined} onClick={() => setTab(p.id)}>{p.rot}</button>
         ))}
       </nav>
