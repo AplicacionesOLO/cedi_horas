@@ -84,7 +84,11 @@ Filtros:
 
 Muestra, por embarque: cliente(s), turnos, personas, horas, costo y % del total. Se descarga en **CSV** o **Excel** (dos hojas: resumen y detalle).
 
-> Nota sobre el filtro por cliente: al filtrar por una compañía, el sistema cuenta **todo lo atribuible a esa compañía**, incluyendo las horas extra que se le cargaron aunque el horario normal del turno fuera de otro cliente. Por eso el total por cliente coincide entre Embarques y Tablero.
+**Fila “(sin embarque)”**: las horas que no están asignadas a ningún contenedor (turnos registrados sin embarque, o con detalle parcial) se agrupan en una fila al final llamada “(sin embarque)”, resaltada en ámbar. Un KPI arriba muestra cuántas horas y cuánto costo quedaron sin asignar a un contenedor.
+
+> **Por qué antes no cuadraba con el Tablero:** el reporte de Embarques solo cuenta horas asignadas a un contenedor y tiene su propio filtro de fechas, mientras que el Tablero suma **todo** el histórico del cliente. Con la fila “(sin embarque)” ya no se pierden horas: **el total de Embarques coincide con el reporte por cliente del Tablero siempre que uses el mismo rango de fechas** (usá el atajo “Todo el historial” para comparar contra el Tablero, que no filtra fecha).
+>
+> Al filtrar por una compañía, ambos módulos cuentan **todo lo atribuible a esa compañía**, incluidas las horas extra que se le cargaron aunque el horario normal del turno fuera de otro cliente.
 
 ---
 

@@ -372,28 +372,42 @@ function horasPorEmbarque(turno, bloqueMin = 1) {
  * hora extra, ese recargo se prorratea entre los embarques que atendió.
  * Devuelve filas ordenadas por costo descendente.
  */
-function costoPorEmbarque(turnos, tarifa, bloqueMin = 1, umbral = UMBRAL_EXTRA_DEFECTO, factor = FACTOR_EXTRA_DEFECTO, cliente = "") {
+const SIN_EMBARQUE = "(sin embarque)";   // fila que agrupa horas no asignadas a un contenedor
+
+function costoPorEmbarque(turnos, tarifa, bloqueMin = 1, umbral = UMBRAL_EXTRA_DEFECTO, factor = FACTOR_EXTRA_DEFECTO, cliente = "", incluirSinEmbarque = true) {
   const m = new Map();
+  const acumular = (codigo, horas, costo, t) => {
+    const a = m.get(codigo) || {
+      codigo, horas: 0, costo: 0, turnos: 0, clientes: new Set(), colaboradores: new Set(),
+      primera: t.fecha, ultima: t.fecha,
+    };
+    a.horas += horas;
+    a.costo += costo;
+    a.turnos += 1;
+    if (t.cliente) a.clientes.add(t.cliente);
+    if (t.colaborador) a.colaboradores.add(t.colaborador);
+    if (t.fecha < a.primera) a.primera = t.fecha;
+    if (t.fecha > a.ultima) a.ultima = t.fecha;
+    m.set(codigo, a);
+  };
   turnos.forEach(t => {
+    const at = atribuibleACliente(t, cliente, tarifa, bloqueMin, umbral, factor);
+    if (at.horas <= 0 && at.costo <= 0) return;   // el turno no aporta a este cliente
     const reparto = horasPorEmbarque(t, bloqueMin);
-    const totH = reparto.reduce((s, e) => s + e.horas, 0);
-    // Costo atribuible al cliente filtrado (o todo el turno si no hay filtro).
-    const costoT = atribuibleACliente(t, cliente, tarifa, bloqueMin, umbral, factor).costo;
+    const horasEmb = reparto.reduce((s, e) => s + e.horas, 0);
+    // El costo/horas del cliente se reparte entre los embarques en proporción a sus horas.
+    // Si el turno no tiene embarques (o solo cubren parte), el resto va a "(sin embarque)".
+    const totHturno = horasTurno(t.entrada, t.salida, t.descansoMin || 0, bloqueMin) || horasEmb || 1;
     reparto.forEach(({ codigo, horas }) => {
-      const costo = totH > 0 ? (costoT * horas) / totH : 0;   // prorrateo por horas
-      const a = m.get(codigo) || {
-        codigo, horas: 0, costo: 0, turnos: 0, clientes: new Set(), colaboradores: new Set(),
-        primera: t.fecha, ultima: t.fecha,
-      };
-      a.horas += horas;
-      a.costo += costo;
-      a.turnos += 1;
-      if (t.cliente) a.clientes.add(t.cliente);
-      if (t.colaborador) a.colaboradores.add(t.colaborador);
-      if (t.fecha < a.primera) a.primera = t.fecha;
-      if (t.fecha > a.ultima) a.ultima = t.fecha;
-      m.set(codigo, a);
+      const frac = totHturno > 0 ? horas / totHturno : 0;
+      acumular(codigo, Math.round(at.horas * frac * 100) / 100, at.costo * frac, t);
     });
+    // Horas atribuibles que quedaron fuera de cualquier embarque.
+    const cubiertas = Math.min(horasEmb, totHturno);
+    const fraccionSin = totHturno > 0 ? Math.max(0, (totHturno - cubiertas) / totHturno) : (reparto.length ? 0 : 1);
+    if (incluirSinEmbarque && fraccionSin > 0.0001) {
+      acumular(SIN_EMBARQUE, Math.round(at.horas * fraccionSin * 100) / 100, at.costo * fraccionSin, t);
+    }
   });
   return [...m.values()]
     .map(x => ({
@@ -405,8 +419,10 @@ function costoPorEmbarque(turnos, tarifa, bloqueMin = 1, umbral = UMBRAL_EXTRA_D
       clientes: [...x.clientes].sort(),
       primera: x.primera,
       ultima: x.ultima,
+      sinEmbarque: x.codigo === SIN_EMBARQUE,
     }))
-    .sort((a, b) => b.costo - a.costo);
+    // "(sin embarque)" siempre al final; el resto por costo descendente.
+    .sort((a, b) => (a.sinEmbarque - b.sinEmbarque) || (b.costo - a.costo));
 }
 
 /* — formato — */
@@ -2229,6 +2245,9 @@ function Embarques({ datos }) {
   const totHoras = reporte.reduce((s, r) => s + r.horas, 0);
   const totCosto = reporte.reduce((s, r) => s + r.costo, 0);
   const maxCosto = Math.max(...reporte.map(r => r.costo), 1);
+  // Fila "(sin embarque)": horas del cliente que no están asignadas a un contenedor.
+  const filaSin = reporte.find(r => r.sinEmbarque);
+  const nEmbReales = reporte.filter(r => !r.sinEmbarque).length;
 
   const rotuloRango = `${fmtLargo(desde)} → ${fmtLargo(hasta)}`;
   const sufijo = (fCliente ? "_" + fCliente : "") + `_${desde}_${hasta}`;
@@ -2244,18 +2263,28 @@ function Embarques({ datos }) {
   // El costo del turno (con extra) se prorratea entre sus embarques por horas.
   const filasDetalle = () => {
     const out = [["Embarque","Fecha","Cliente","Colaborador","Departamento","Horas embarque","Costo ₡","Entrada","Salida"]];
+    const q = busca.trim().toUpperCase();
     turnosRango.slice()
       .sort((a,b) => a.fecha.localeCompare(b.fecha))
       .forEach(t => {
+        const at = atribuibleACliente(t, fCliente, T, bloque, UM, FX);
+        if (at.horas <= 0 && at.costo <= 0) return;
         const reparto = horasPorEmbarque(t, bloque);
-        const totH = reparto.reduce((s, e) => s + e.horas, 0);
-        const costoT = atribuibleACliente(t, fCliente, T, bloque, UM, FX).costo;
+        const horasEmb = reparto.reduce((s, e) => s + e.horas, 0);
+        const totHturno = horasTurno(t.entrada, t.salida, t.descansoMin || 0, bloque) || horasEmb || 1;
         reparto.forEach(({ codigo, horas }) => {
-          if (busca.trim() && !codigo.includes(busca.trim().toUpperCase())) return;
-          const costo = totH > 0 ? Math.round((costoT * horas) / totH) : 0;
+          if (q && !codigo.includes(q)) return;
+          const frac = totHturno > 0 ? horas / totHturno : 0;
           out.push([codigo, fmtLargo(t.fecha), t.cliente, t.colaborador, t.departamento,
-            Math.round(horas*100)/100, costo, t.entrada, t.salida]);
+            Math.round(at.horas * frac * 100) / 100, Math.round(at.costo * frac), t.entrada, t.salida]);
         });
+        // Parte no asignada a ningún embarque.
+        const cubiertas = Math.min(horasEmb, totHturno);
+        const fracSin = totHturno > 0 ? Math.max(0, (totHturno - cubiertas) / totHturno) : (reparto.length ? 0 : 1);
+        if (fracSin > 0.0001 && (!q || SIN_EMBARQUE.toUpperCase().includes(q))) {
+          out.push([SIN_EMBARQUE, fmtLargo(t.fecha), t.cliente, t.colaborador, t.departamento,
+            Math.round(at.horas * fracSin * 100) / 100, Math.round(at.costo * fracSin), t.entrada, t.salida]);
+        }
       });
     return out;
   };
@@ -2300,16 +2329,21 @@ function Embarques({ datos }) {
           </div>
           <p className="kpi-s" style={{ marginTop: 10 }}>
             Suma el costo de todas las horas trabajadas por distintos colaboradores registradas bajo un mismo embarque.
-            Cuando un turno no reparte horas entre sus embarques, se dividen en partes iguales.
+            Cuando un turno no reparte horas entre sus embarques, se dividen en partes iguales. Las horas que no están
+            asignadas a ningún contenedor se agrupan en la fila <strong>“{SIN_EMBARQUE}”</strong>, para que el total
+            cuadre con el reporte por cliente del Tablero (usando el mismo rango de fechas).
           </p>
         </div>
       </div>
 
       {/* ── KPIs ── */}
-      <div className="rejilla g3" style={{ marginTop: 14 }}>
-        <Kpi rot="Embarques en el rango" valor={String(reporte.length)} sub={rotuloRango} />
+      <div className="rejilla g4" style={{ marginTop: 14 }}>
+        <Kpi rot="Embarques en el rango" valor={String(nEmbReales)} sub={rotuloRango} />
         <Kpi rot="Horas totales" valor={hh(totHoras)} sub={`Tarifa ₡${miles(T)}/h`} />
         <Kpi rot="Costo total" valor={crc(totCosto)} sub={crcK(totCosto)} />
+        <Kpi rot="Sin embarque" valor={filaSin ? hh(filaSin.horas) : "0,00"}
+          sub={filaSin ? `${crc(filaSin.costo)} sin asignar a contenedor` : "todo asignado a embarque"}
+          color={filaSin ? "var(--aviso-texto)" : "var(--ok)"} />
       </div>
 
       {/* ── TABLA ── */}
@@ -2332,9 +2366,12 @@ function Embarques({ datos }) {
               </tr></thead>
               <tbody>
                 {reporte.map(r => (
-                  <tr key={r.codigo}>
-                    <td><span className="cont-cod" style={{ fontWeight: 600 }}>{r.codigo}</span>
-                      <div className="pista" style={{ marginTop: 5 }}><i style={{ width: `${(r.costo/maxCosto)*100}%` }} /></div>
+                  <tr key={r.codigo} style={r.sinEmbarque ? { background: "#FDF6EA" } : undefined}>
+                    <td>
+                      {r.sinEmbarque
+                        ? <span style={{ fontWeight: 600, color: "var(--aviso-texto)" }}>{r.codigo}</span>
+                        : <span className="cont-cod" style={{ fontWeight: 600 }}>{r.codigo}</span>}
+                      <div className="pista" style={{ marginTop: 5 }}><i style={{ width: `${(r.costo/maxCosto)*100}%`, background: r.sinEmbarque ? "var(--aviso)" : undefined }} /></div>
                     </td>
                     <td style={{ color: "var(--tinta-2)", fontSize: 12.5 }}>{r.clientes.join(", ") || "—"}</td>
                     <td className="n">{r.turnos}</td>
