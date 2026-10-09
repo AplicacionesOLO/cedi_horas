@@ -42,11 +42,12 @@ Pestaña **Registrar**. Es la pantalla del día a día en el patio.
 
 Mientras escribís, abajo se ve el **cálculo en vivo**: horas del turno, horas extra, costo (normal + recargo) y embarques.
 
-### Horas extra
-- Las primeras **9 horas** del turno se pagan a tarifa normal.
-- A partir de la **hora 10** cada hora es **extra** y se paga a **tarifa × 1,5**.
-- El umbral (9 h) y el recargo (×1,5) se configuran en Ajustes.
-- Si un turno supera las 9 h, aparece un selector **"Compañía de las horas extra"**: podés cargar el horario normal a una compañía y las horas extra a **otra compañía** distinta. Si no elegís nada, las extra quedan en el mismo cliente del turno.
+### Horas extra (por día, por persona)
+- El umbral se aplica al **total de horas que un colaborador trabaja en el día**, sumando todos sus turnos/procesos. Las primeras **9,5 horas del día** se pagan a tarifa normal; lo que exceda es **extra**, a **tarifa × 1,5**.
+- El umbral (9,5 h) y el recargo (×1,5) se configuran en Ajustes.
+- Las horas extra se asignan **cronológicamente a los últimos turnos del día** y se cargan automáticamente al **cliente de esos turnos** (no hay selector manual).
+- **Ejemplo**: Pepito trabaja de 7:00 a 17:00 en el proceso 1 (10 h) y de 17:00 a 20:00 en el proceso 2 (3 h) = 13 h → **9,5 normales + 3,5 extra**. Esas 3,5 h extra caen en el proceso 2 (y la media hora final del proceso 1), y se cargan a los clientes de esos turnos.
+- En el formulario, al registrar un turno que cruza el umbral, el cálculo en vivo avisa cuántas horas ya trabajó esa persona en el día y cuántas de este turno son extra.
 
 Al final, **Registrar turno** guarda. Los turnos del día aparecen listados abajo, con opción de **Editar** o **Borrar**.
 
@@ -109,7 +110,7 @@ Pestaña **Tablero**. La vista gerencial.
 
 Pestaña **Ajustes**.
 
-- **Parámetros de costeo**: tarifa por hora, redondeo del turno, umbral de horas extra (9 h) y recargo (×1,5).
+- **Parámetros de costeo**: tarifa por hora, redondeo del turno, umbral de horas extra por día/persona (9,5 h) y recargo (×1,5).
 - **Catálogos**: alta y baja de departamentos, clientes y colaboradores.
 - **Presupuestos mensuales**: monto aprobado por mes y su ejecución.
 - **Datos**: exportar todo a CSV, cargar datos de ejemplo y borrar todos los registros (con confirmación).
@@ -162,11 +163,11 @@ Los CSV se abren en Excel en español (separador `;`). Los Excel bajan como arch
 **¿Por qué la semana empieza el viernes?**
 Porque la revisión operativa se hace los viernes por la mañana sobre la semana recién cerrada (viernes a jueves).
 
-**¿Cómo se calcula el costo de un turno?**
-Horas trabajadas = salida − entrada − tiempo no laborado. Las primeras 9 h a tarifa normal, el resto a tarifa × 1,5. El costo se redondea a colones enteros.
+**¿Cómo se calcula el costo?**
+Horas trabajadas = salida − entrada − tiempo no laborado. El umbral de horas extra se aplica al **total del día por colaborador**: las primeras 9,5 h del día a tarifa normal y el resto a tarifa × 1,5. Si una persona hizo varios procesos el mismo día, se suman todos para decidir las extra. El costo se redondea a colones enteros.
 
-**Cargué horas extra a otra compañía, ¿dónde lo veo?**
-En el reporte "Por cliente" de Semana y Tablero: la parte normal se le carga al cliente del turno y las horas extra a la compañía que elegiste.
+**¿A qué cliente se le cargan las horas extra?**
+Al cliente de los turnos donde caen cronológicamente (los últimos del día). Si Pepito hizo el horario normal en un proceso y luego trabajó en otro proceso/cliente que lo llevó sobre las 9,5 h, esas horas extra se le cargan al segundo cliente. Se ve en los reportes "Por cliente" de Semana y Tablero.
 
 **Los datos, ¿se comparten entre dispositivos?**
 Sí. Se guardan en la nube (Supabase) y se respaldan localmente para trabajar sin conexión; sincroniza cuando vuelve la señal.
