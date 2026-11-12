@@ -1532,7 +1532,7 @@ function TablaReporte({ titulo, etiqueta, filas, totalCosto, onExcel }) {
   );
 }
 
-function Tablero({ datos, setPresupuesto }) {
+function Tablero({ datos, setPresupuesto, soloLectura = false }) {
   const T = datos.tarifa;
   const UM = datos.umbralExtra ?? UMBRAL_EXTRA_DEFECTO;
   const FX = datos.factorExtra ?? FACTOR_EXTRA_DEFECTO;
@@ -1745,7 +1745,8 @@ function Tablero({ datos, setPresupuesto }) {
         <div className="placa-cue">
           <label className="campo" style={{ maxWidth: 320 }}><span>Presupuesto aprobado del mes (₡)</span>
             <input type="number" className="num-in" min="0" step="50000" value={presupuesto || ""}
-              placeholder="0" onChange={e => setPresupuesto(mesSel, Number(e.target.value) || 0)} />
+              placeholder="0" readOnly={soloLectura} disabled={soloLectura}
+              onChange={e => { if (!soloLectura) setPresupuesto(mesSel, Number(e.target.value) || 0); }} />
           </label>
 
           <div className="pista" style={{ height: 22, position: "relative", marginBottom: 8 }}>
@@ -1993,6 +1994,26 @@ function Ajustes({ datos, setDatos, avisar, esAdmin = true, registrar = () => {}
     registrar("Quitó", etiqueta, v);
   };
 
+  /* Reasignar un cliente dentro de otro: mueve todos los turnos del origen
+     al destino, quita el origen del catálogo y lo registra en la bitácora. */
+  const [reaOrigen, setReaOrigen] = useState("");
+  const [reaDestino, setReaDestino] = useState("");
+  const turnosOrigen = useMemo(
+    () => (reaOrigen ? datos.turnos.filter(t => t.cliente === reaOrigen).length : 0),
+    [datos.turnos, reaOrigen]);
+  const reasignarCliente = () => {
+    if (!reaOrigen || !reaDestino || reaOrigen === reaDestino) return;
+    setDatos(d => ({
+      ...d,
+      turnos: d.turnos.map(t => t.cliente === reaOrigen ? { ...t, cliente: reaDestino } : t),
+      // El destino queda; el origen se elimina del catálogo.
+      clientes: [...new Set([...d.clientes.filter(c => c !== reaOrigen), reaDestino])],
+    }));
+    registrar("Reasignó", "Cliente", `${reaOrigen} → ${reaDestino} en ${turnosOrigen} turno(s)`);
+    avisar(`${turnosOrigen} turno(s) de ${reaOrigen} pasaron a ${reaDestino}`);
+    setReaOrigen(""); setReaDestino("");
+  };
+
   /* El operario solo puede administrar colaboradores externos. */
   if (!esAdmin) {
     return (
@@ -2061,6 +2082,42 @@ function Ajustes({ datos, setDatos, avisar, esAdmin = true, registrar = () => {}
           <ListaEditable titulo="Colaboradores externos" items={datos.colaboradores} placeholder="Nombre y apellidos"
             onAdd={v => addCat("colaboradores", "Colaborador", v)}
             onDel={v => delCat("colaboradores", "Colaborador", v)} />
+        </div>
+      </div>
+
+      <div className="placa">
+        <div className="placa-cab"><h2>Reasignar cliente</h2></div>
+        <div className="placa-cue">
+          <p className="kpi-s" style={{ marginBottom: 14 }}>
+            Mueve todos los turnos de un cliente a otro (por ejemplo, pasar todo lo de <strong>OLO</strong> a
+            <strong> Zona Franca</strong>). El cliente de origen se quita del catálogo y el cambio queda en la bitácora.
+          </p>
+          <div style={{ display: "flex", gap: 12, alignItems: "flex-end", flexWrap: "wrap" }}>
+            <label className="campo" style={{ margin: 0, minWidth: 180 }}><span>Cliente de origen</span>
+              <select value={reaOrigen} onChange={e => setReaOrigen(e.target.value)}>
+                <option value="">Seleccionar…</option>
+                {datos.clientes.map(c => <option key={c} value={c}>{c}</option>)}
+              </select>
+            </label>
+            <span style={{ paddingBottom: 12, color: "var(--tinta-2)" }}>→</span>
+            <label className="campo" style={{ margin: 0, minWidth: 180 }}><span>Cliente de destino</span>
+              <select value={reaDestino} onChange={e => setReaDestino(e.target.value)}>
+                <option value="">Seleccionar…</option>
+                {datos.clientes.filter(c => c !== reaOrigen).map(c => <option key={c} value={c}>{c}</option>)}
+              </select>
+            </label>
+            <button className="btn btn-senal btn-s" onClick={reasignarCliente}
+              disabled={!reaOrigen || !reaDestino || reaOrigen === reaDestino}>
+              Reasignar
+            </button>
+          </div>
+          {reaOrigen && (
+            <div className="aviso" style={{ marginTop: 12 }}>
+              {turnosOrigen > 0
+                ? <>Se moverán <strong>{turnosOrigen}</strong> turno(s) de <strong>{reaOrigen}</strong>{reaDestino ? <> a <strong>{reaDestino}</strong></> : ""}. Esta acción no se puede deshacer automáticamente.</>
+                : <><strong>{reaOrigen}</strong> no tiene turnos; solo se quitará del catálogo.</>}
+            </div>
+          )}
         </div>
       </div>
 
@@ -2628,13 +2685,14 @@ function Login({ onEntrar }) {
    10. APLICACIÓN
    ════════════════════════════════════════════════════════ */
 
+// soloAdmin: solo el rol admin la ve. edita: pantalla que modifica datos (el rol rh, de solo lectura, no la ve).
 const PESTANAS = [
-  { id: "registro",  rot: "Registrar" },
+  { id: "registro",  rot: "Registrar", edita: true },
   { id: "semana",    rot: "Semana" },
   { id: "embarques", rot: "Embarques" },
   { id: "tablero",   rot: "Tablero" },
   { id: "usuarios",  rot: "Usuarios", soloAdmin: true },
-  { id: "ajustes",   rot: "Ajustes" },
+  { id: "ajustes",   rot: "Ajustes", edita: true },
 ];
 
 export default function App() {
@@ -2650,6 +2708,9 @@ export default function App() {
   const [sesion, setSesion] = useState(undefined);   // undefined = verificando; null = sin sesión
   const [perfil, setPerfil] = useState(null);        // { correo, nombre, rol, es_admin }
   const esAdmin = !!(perfil && perfil.es_admin);
+  // Rol "rh": solo lectura. Ve reportes pero no puede crear, editar ni borrar nada.
+  const esRH = !!(perfil && perfil.rol === "rh");
+  const soloLectura = esRH;
 
   const cargarPerfil = async () => {
     if (!window.oloAuth) { setSesion(null); return; }
@@ -2699,6 +2760,7 @@ export default function App() {
   useEffect(() => {
     if (cargando) return;
     if (primera.current) { primera.current = false; return; }
+    if (soloLectura) return;   // rol rh: nunca escribe (ni en la nube ni en el respaldo local)
     (async () => {
       const r = await almacen.escribir(K_DATOS, datos);
       if (r && r.ok === false) {
@@ -2706,6 +2768,13 @@ export default function App() {
       }
     })();
   }, [datos, cargando]);
+
+  // Si el rol es de solo lectura y cayó en una pantalla que edita, llevalo a Semana.
+  useEffect(() => {
+    if (!perfil) return;
+    const actual = PESTANAS.find(p => p.id === tab);
+    if (soloLectura && actual && (actual.edita || actual.soloAdmin)) setTab("semana");
+  }, [perfil, tab, soloLectura]);
 
   const avisar = (m) => { setToast(m); setTimeout(() => setToast(null), 4600); };
 
@@ -2727,6 +2796,7 @@ export default function App() {
   };
 
   const guardarTurno = (t) => {
+    if (soloLectura) return;
     const existe = datos.turnos.some(x => x.id === t.id);
     setDatos(d => ({
       ...d,
@@ -2739,6 +2809,7 @@ export default function App() {
       `${fmtLargo(t.fecha)} · ${t.colaborador} · ${t.departamento} · ${t.cliente} · ${hh(h)} h`);
   };
   const borrarTurno = (id) => {
+    if (soloLectura) return;
     const t = datos.turnos.find(x => x.id === id);
     setDatos(d => ({ ...d, turnos: d.turnos.filter(t => t.id !== id) }));
     avisar("Turno eliminado");
@@ -2746,6 +2817,7 @@ export default function App() {
     else registrar("Eliminó", "Turno", `id ${id}`);
   };
   const setPresupuesto = (mes, monto) => {
+    if (soloLectura) return;
     const anterior = datos.presupuestos[mes] || 0;
     setDatos(d => ({ ...d, presupuestos: { ...d.presupuestos, [mes]: monto } }));
     if (anterior !== monto) registrar("Editó", "Presupuesto", `${nombreMes(mes)}: ${crc(anterior)} → ${crc(monto)}`);
@@ -2794,7 +2866,7 @@ export default function App() {
           <div className="usuario-caja">
             <div style={{ textAlign: "right" }}>
               <div className="num" style={{ fontSize: 13, fontWeight: 600 }}>{perfil ? (perfil.nombre || perfil.correo) : ""}</div>
-              <span className={"rol-pill" + (esAdmin ? " admin" : "")}>{esAdmin ? "Admin" : "Operario"}</span>
+              <span className={"rol-pill" + (esAdmin ? " admin" : "")}>{esAdmin ? "Admin" : esRH ? "RH · solo lectura" : "Operario"}</span>
             </div>
             <button className="btn btn-2 btn-s" onClick={salir} title="Cerrar sesión">Salir</button>
           </div>
@@ -2810,22 +2882,24 @@ export default function App() {
       {vacio && tab !== "ajustes" && (
         <div className="marco"><div className="placa"><div className="vacio">
           <h2 style={{ marginBottom: 10 }}>Sin registros todavía</h2>
-          <p>Registrá el primer turno en esta pestaña{esAdmin ? ", o cargá nueve ciclos de datos de ejemplo para ver cómo se comportan la auditoría semanal y la proyección." : "."}</p>
+          <p>{soloLectura
+            ? "Todavía no hay turnos registrados. Cuando el equipo de operaciones los cargue, vas a verlos acá."
+            : <>Registrá el primer turno en esta pestaña{esAdmin ? ", o cargá nueve ciclos de datos de ejemplo para ver cómo se comportan la auditoría semanal y la proyección." : "."}</>}</p>
           {esAdmin && <button className="btn btn-senal btn-s" onClick={() => { setDatos(datosEjemplo()); avisar("Datos de ejemplo cargados"); }}>Cargar datos de ejemplo</button>}
         </div></div></div>
       )}
 
-      {tab === "registro" && <div className="marco"><Registro datos={datos} guardar={guardarTurno} borrar={borrarTurno} avisar={avisar} /></div>}
+      {tab === "registro" && !soloLectura && <div className="marco"><Registro datos={datos} guardar={guardarTurno} borrar={borrarTurno} avisar={avisar} /></div>}
       {tab === "semana"    && <Semana datos={datos} offset={offset} setOffset={setOffset} />}
       {tab === "embarques" && <Embarques datos={datos} />}
-      {tab === "tablero"   && <Tablero datos={datos} setPresupuesto={setPresupuesto} />}
+      {tab === "tablero"   && <Tablero datos={datos} setPresupuesto={setPresupuesto} soloLectura={soloLectura} />}
       {tab === "usuarios"  && esAdmin && <Usuarios registrar={registrar} />}
-      {tab === "ajustes"  && <Ajustes datos={datos} setDatos={setDatos} avisar={avisar} esAdmin={esAdmin} registrar={registrar} />}
+      {tab === "ajustes"  && !soloLectura && <Ajustes datos={datos} setDatos={setDatos} avisar={avisar} esAdmin={esAdmin} registrar={registrar} />}
 
       {toast && <div className="toast"><span className="sello">OK</span>{toast}</div>}
 
       <nav className="nav">
-        {PESTANAS.filter(p => !p.soloAdmin || esAdmin).map(p => (
+        {PESTANAS.filter(p => (!p.soloAdmin || esAdmin) && !(soloLectura && p.edita)).map(p => (
           <button key={p.id} aria-current={tab === p.id ? "page" : undefined} onClick={() => setTab(p.id)}>{p.rot}</button>
         ))}
       </nav>

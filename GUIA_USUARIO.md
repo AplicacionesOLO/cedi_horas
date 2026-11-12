@@ -15,6 +15,7 @@ El ciclo de trabajo va de **viernes a jueves**: cada viernes se revisa lo de la 
 **Roles**
 - **Admin**: ve y hace todo, incluidos Ajustes completos, la administración de Usuarios y el borrado masivo.
 - **Operario**: registra turnos y ve los reportes; en Ajustes solo puede agregar colaboradores externos. No ve Usuarios ni el borrado masivo.
+- **RH (solo lectura)**: ve los reportes de **Semana, Embarques y Tablero** y puede descargarlos, pero **no puede crear, editar ni borrar nada**. No ve las pestañas Registrar, Ajustes ni Usuarios, y el presupuesto del Tablero aparece bloqueado. La restricción también está aplicada en la base de datos, no solo en la pantalla.
 
 Si no tenés cuenta, un administrador te la crea (ver sección Usuarios).
 
