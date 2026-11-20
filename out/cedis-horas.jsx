@@ -386,8 +386,12 @@ function turnoTocaCliente(t, cliente) {
  */
 function atribuibleACliente(t, cliente, tarifa, bloqueMin = 1, umbral = UMBRAL_EXTRA_DEFECTO, factor = FACTOR_EXTRA_DEFECTO) {
   const d = desgloseTurnoCliente(t, tarifa, bloqueMin, umbral, factor);
-  if (cliente && d.clienteNormal !== cliente) return { horas: 0, costo: 0 };
-  return { horas: Math.round((d.horasNormales + d.horasExtra) * 100) / 100, costo: d.costoNormal + d.costoExtra };
+  if (cliente && d.clienteNormal !== cliente) return { horas: 0, normales: 0, extra: 0, costo: 0 };
+  return {
+    horas: Math.round((d.horasNormales + d.horasExtra) * 100) / 100,   // total (ordinarias + extra)
+    normales: d.horasNormales, extra: d.horasExtra,
+    costo: d.costoNormal + d.costoExtra,
+  };
 }
 
 /**
@@ -426,12 +430,14 @@ const SIN_EMBARQUE = "(sin embarque)";   // fila que agrupa horas no asignadas a
 function costoPorEmbarque(turnosRaw, tarifa, bloqueMin = 1, umbral = UMBRAL_EXTRA_DEFECTO, factor = FACTOR_EXTRA_DEFECTO, cliente = "", incluirSinEmbarque = true) {
   const turnos = anotarExtra(turnosRaw, umbral, bloqueMin);   // reparto diario de extra
   const m = new Map();
-  const acumular = (codigo, horas, costo, t) => {
+  const acumular = (codigo, horas, costo, t, normales = 0, extra = 0) => {
     const a = m.get(codigo) || {
-      codigo, horas: 0, costo: 0, turnos: 0, clientes: new Set(), colaboradores: new Set(),
+      codigo, horas: 0, normales: 0, extra: 0, costo: 0, turnos: 0, clientes: new Set(), colaboradores: new Set(),
       primera: t.fecha, ultima: t.fecha,
     };
     a.horas += horas;
+    a.normales += normales;
+    a.extra += extra;
     a.costo += costo;
     a.turnos += 1;
     if (t.cliente) a.clientes.add(t.cliente);
@@ -450,19 +456,21 @@ function costoPorEmbarque(turnosRaw, tarifa, bloqueMin = 1, umbral = UMBRAL_EXTR
     const totHturno = horasTurno(t.entrada, t.salida, t.descansoMin || 0, bloqueMin) || horasEmb || 1;
     reparto.forEach(({ codigo, horas }) => {
       const frac = totHturno > 0 ? horas / totHturno : 0;
-      acumular(codigo, Math.round(at.horas * frac * 100) / 100, at.costo * frac, t);
+      acumular(codigo, Math.round(at.horas * frac * 100) / 100, at.costo * frac, t, at.normales * frac, at.extra * frac);
     });
     // Horas atribuibles que quedaron fuera de cualquier embarque.
     const cubiertas = Math.min(horasEmb, totHturno);
     const fraccionSin = totHturno > 0 ? Math.max(0, (totHturno - cubiertas) / totHturno) : (reparto.length ? 0 : 1);
     if (incluirSinEmbarque && fraccionSin > 0.0001) {
-      acumular(SIN_EMBARQUE, Math.round(at.horas * fraccionSin * 100) / 100, at.costo * fraccionSin, t);
+      acumular(SIN_EMBARQUE, Math.round(at.horas * fraccionSin * 100) / 100, at.costo * fraccionSin, t, at.normales * fraccionSin, at.extra * fraccionSin);
     }
   });
   return [...m.values()]
     .map(x => ({
       codigo: x.codigo,
       horas: Math.round(x.horas * 100) / 100,
+      normales: Math.round(x.normales * 100) / 100,
+      extra: Math.round(x.extra * 100) / 100,
       costo: Math.round(x.costo),
       turnos: x.turnos,
       personas: x.colaboradores.size,
@@ -1103,8 +1111,8 @@ function agrupar(turnosRaw, clave, tarifa, umbral = UMBRAL_EXTRA_DEFECTO, factor
     const { normales, extra } = horasTurnoNE(t, umbral, bloqueMin);
     const h = normales + extra;
     const k = t[clave] || "—";
-    const a = m.get(k) || { nombre: k, horas: 0, extra: 0, costo: 0, turnos: 0 };
-    a.horas += h; a.extra += extra; a.costo += costoDeTurno(t, tarifa, bloqueMin, umbral, factor); a.turnos++;
+    const a = m.get(k) || { nombre: k, horas: 0, normales: 0, extra: 0, costo: 0, turnos: 0 };
+    a.horas += h; a.normales += normales; a.extra += extra; a.costo += costoDeTurno(t, tarifa, bloqueMin, umbral, factor); a.turnos++;
     m.set(k, a);
   });
   return [...m.values()].sort((a,b) => b.costo - a.costo);
@@ -1120,15 +1128,16 @@ function agruparPorCliente(turnosRaw, tarifa, umbral = UMBRAL_EXTRA_DEFECTO, fac
   turnos.forEach(t => {
     // Normal y extra van al mismo cliente del turno (reparto cronológico diario).
     const d = desgloseTurnoCliente(t, tarifa, bloqueMin, umbral, factor);
-    const a = m.get(d.clienteNormal) || { nombre: d.clienteNormal, horas: 0, extra: 0, costo: 0, turnos: 0 };
+    const a = m.get(d.clienteNormal) || { nombre: d.clienteNormal, horas: 0, normales: 0, extra: 0, costo: 0, turnos: 0 };
     a.horas += d.horasNormales + d.horasExtra;
+    a.normales += d.horasNormales;
     a.extra += d.horasExtra;
     a.costo += d.costoNormal + d.costoExtra;
     a.turnos++;
     m.set(d.clienteNormal, a);
   });
   return [...m.values()]
-    .map(x => ({ ...x, horas: Math.round(x.horas*100)/100, extra: Math.round(x.extra*100)/100, costo: Math.round(x.costo) }))
+    .map(x => ({ ...x, horas: Math.round(x.horas*100)/100, normales: Math.round(x.normales*100)/100, extra: Math.round(x.extra*100)/100, costo: Math.round(x.costo) }))
     .sort((a,b) => b.costo - a.costo);
 }
 
@@ -1200,7 +1209,7 @@ function Semana({ datos, offset, setOffset }) {
         iso,
         colaboradores: cols.size,
         turnos: ts.length,
-        horas: Math.round(horasT * 100) / 100,
+        horas: Math.round(horasN * 100) / 100,          // horas ORDINARIAS (las extra van aparte)
         horasExtra: Math.round(horasE * 100) / 100,
         subtotalNormal: Math.round(costoN),
         costoExtra: Math.round(costoE),
@@ -1221,7 +1230,7 @@ function Semana({ datos, offset, setOffset }) {
     const montoHora = T;
     const montoHoraExtra = Math.round(T * FX);
     const filas = [[
-      "Fecha", "Cantidad colaboradores", "Cantidad de horas", "Cantidad de costo",
+      "Fecha", "Cantidad colaboradores", "Cantidad de horas ordinarias", "Cantidad de costo",
       "Monto hora", "Sub total jornada normal", "Cantidad horas extra", "Monto hora extra",
       "Cantidad costo horas extra", "Total horas extra", "Total general del día",
     ]];
@@ -1350,7 +1359,7 @@ function Semana({ datos, offset, setOffset }) {
                 <thead><tr>
                   <th>Fecha</th>
                   <th className="n">Colaboradores</th>
-                  <th className="n">Horas</th>
+                  <th className="n">Horas ordinarias</th>
                   <th className="n">Monto hora</th>
                   <th className="n">Sub total jornada normal</th>
                   <th className="n">Horas extra</th>
@@ -1429,20 +1438,23 @@ function Semana({ datos, offset, setOffset }) {
           ) : (
             <div className="tabla-env">
               <table>
-                <thead><tr><th>Colaborador</th><th className="n">Turnos</th><th className="n">Horas</th><th className="n">Promedio/turno</th><th className="n">Costo</th></tr></thead>
+                <thead><tr><th>Colaborador</th><th className="n">Turnos</th><th className="n">Horas ordinarias</th><th className="n">Horas extra</th><th className="n">Total horas</th><th className="n">Costo</th></tr></thead>
                 <tbody>
                   {porPersona.map(p => (
                     <tr key={p.nombre}>
                       <td style={{ fontWeight: 600 }}>{p.nombre}</td>
                       <td className="n">{p.turnos}</td>
-                      <td className="n">{hh(p.horas)}</td>
-                      <td className="n" style={{ color: p.horas/p.turnos > 10 ? "var(--alerta)" : undefined }}>{hh(p.horas/p.turnos)}</td>
+                      <td className="n">{hh(p.normales)}</td>
+                      <td className="n" style={{ color: p.extra > 0 ? "var(--alerta)" : "var(--tinta-3)" }}>{p.extra > 0 ? hh(p.extra) : "—"}</td>
+                      <td className="n" style={{ color: "var(--tinta-2)" }}>{hh(p.horas)}</td>
                       <td className="n">{crc(p.costo)}</td>
                     </tr>
                   ))}
                   <tr className="tot">
-                    <td>Total del ciclo</td><td className="n">{enCiclo.length}</td><td className="n">{hh(horas)}</td>
-                    <td className="n">{hh(horas / (enCiclo.length || 1))}</td><td className="n">{crc(costo)}</td>
+                    <td>Total del ciclo</td><td className="n">{enCiclo.length}</td>
+                    <td className="n">{hh(horas - horasExtra)}</td>
+                    <td className="n">{hh(horasExtra)}</td>
+                    <td className="n">{hh(horas)}</td><td className="n">{crc(costo)}</td>
                   </tr>
                 </tbody>
               </table>
@@ -1455,13 +1467,16 @@ function Semana({ datos, offset, setOffset }) {
           {!enCiclo.length ? <div className="vacio"><p>Sin embarques en el ciclo.</p></div> : (
             <div className="tabla-env">
               <table>
-                <thead><tr><th>Fecha</th><th>Colaborador</th><th>Cliente</th><th className="n">Horas</th><th>Contenedores / embarques</th></tr></thead>
+                <thead><tr><th>Fecha</th><th>Colaborador</th><th>Cliente</th><th className="n">Ordinarias</th><th className="n">Extra</th><th>Contenedores / embarques</th></tr></thead>
                 <tbody>
                   {enCiclo.slice().sort((a,b) => a.fecha.localeCompare(b.fecha) || a.entrada.localeCompare(b.entrada)).map(t => (
                     <tr key={t.id}>
                       <td className="n">{fmtCorto(t.fecha)}</td>
                       <td>{t.colaborador}</td><td>{t.cliente}</td>
-                      <td className="n">{hh(horasTurno(t.entrada, t.salida, t.descansoMin))}</td>
+                      {(() => { const ne = horasTurnoNE(t, UM, datos.bloqueMin); return (<>
+                        <td className="n">{hh(ne.normales)}</td>
+                        <td className="n" style={{ color: ne.extra > 0 ? "var(--alerta)" : "var(--tinta-3)" }}>{ne.extra > 0 ? hh(ne.extra) : "—"}</td>
+                      </>); })()}
                       <td><div style={{ display:"flex", gap:4, flexWrap:"wrap" }}>
                         {t.embarques.length ? t.embarques.map(e => <span className="marca" key={e.id}>{e.codigo}{e.horas ? ` · ${hh(e.horas)}h` : ""}</span>)
                           : <span style={{ color: "var(--tinta-3)" }}>sin detalle</span>}
@@ -1499,7 +1514,7 @@ function TablaReporte({ titulo, etiqueta, filas, totalCosto, onExcel }) {
           <table>
             <thead><tr>
               <th>{etiqueta}</th><th className="n">Turnos</th><th className="n">Personas</th>
-              <th className="n">Horas</th><th className="n">Extra</th><th className="n">Costo</th><th className="n">%</th>
+              <th className="n">Horas ordinarias</th><th className="n">Horas extra</th><th className="n">Costo</th><th className="n">%</th>
             </tr></thead>
             <tbody>
               {filas.map(r => (
@@ -1509,7 +1524,7 @@ function TablaReporte({ titulo, etiqueta, filas, totalCosto, onExcel }) {
                   </td>
                   <td className="n">{r.turnos}</td>
                   <td className="n">{r.personas}</td>
-                  <td className="n">{hh(r.horas)}</td>
+                  <td className="n">{hh(r.normales)}</td>
                   <td className="n" style={{ color: r.extra > 0 ? "var(--alerta)" : "var(--tinta-3)" }}>{r.extra > 0 ? hh(r.extra) : "—"}</td>
                   <td className="n" style={{ fontWeight: 600 }}>{crc(r.costo)}</td>
                   <td className="n" style={{ color: "var(--tinta-2)" }}>{pct(r.costo / (totalCosto || 1))}</td>
@@ -1519,7 +1534,7 @@ function TablaReporte({ titulo, etiqueta, filas, totalCosto, onExcel }) {
                 <td>Total</td>
                 <td className="n">{filas.reduce((s,r)=>s+r.turnos,0)}</td>
                 <td className="n"></td>
-                <td className="n">{hh(filas.reduce((s,r)=>s+r.horas,0))}</td>
+                <td className="n">{hh(filas.reduce((s,r)=>s+(r.normales||0),0))}</td>
                 <td className="n">{hh(filas.reduce((s,r)=>s+(r.extra||0),0))}</td>
                 <td className="n">{crc(totalCosto)}</td>
                 <td className="n">100%</td>
@@ -1629,13 +1644,14 @@ function Tablero({ datos, setPresupuesto, soloLectura = false }) {
       const at = atribuibleACliente(t, fCliente, T, datos.bloqueMin, UM, FX);
       if (at.horas <= 0 && at.costo <= 0) return;   // el turno no aporta a este cliente
       const { extra } = horasTurnoNE(t, UM, datos.bloqueMin);
-      const a = m.get(clave) || { nombre: clave, turnos: 0, horas: 0, extra: 0, costo: 0, personas: new Set() };
-      a.turnos += 1; a.horas += at.horas; a.extra += extra;
+      const a = m.get(clave) || { nombre: clave, turnos: 0, horas: 0, normales: 0, extra: 0, costo: 0, personas: new Set() };
+      a.turnos += 1; a.horas += at.horas; a.normales += at.normales; a.extra += extra;
       a.costo += at.costo; a.personas.add(t.colaborador);
       m.set(clave, a);
     });
     return [...m.values()]
       .map(x => ({ nombre: x.nombre, turnos: x.turnos, horas: Math.round(x.horas*100)/100,
+                   normales: Math.round(x.normales*100)/100,
                    extra: Math.round(x.extra*100)/100, personas: x.personas.size, costo: Math.round(x.costo) }))
       .sort((a,b) => b.costo - a.costo);
   };
@@ -1660,9 +1676,10 @@ function Tablero({ datos, setPresupuesto, soloLectura = false }) {
   const totCosto = sumaCAtrib(turnos);
 
   const filasReporte = (rep, etiqueta) => [
-    [etiqueta, "Turnos", "Personas", "Horas", "Horas extra", "Costo ₡"],
-    ...rep.map(r => [r.nombre, r.turnos, r.personas, r.horas, r.extra, r.costo]),
-    ["TOTAL", turnos.length, new Set(turnos.map(t=>t.colaborador)).size, Math.round(totHoras*100)/100, totExtra, totCosto],
+    [etiqueta, "Turnos", "Personas", "Horas ordinarias", "Horas extra", "Horas totales", "Costo ₡"],
+    ...rep.map(r => [r.nombre, r.turnos, r.personas, r.normales, r.extra, r.horas, r.costo]),
+    ["TOTAL", turnos.length, new Set(turnos.map(t=>t.colaborador)).size,
+      Math.round((totHoras - totExtra)*100)/100, totExtra, Math.round(totHoras*100)/100, totCosto],
   ];
 
   const filasDetalle = () => [
@@ -2330,7 +2347,9 @@ function Embarques({ datos }) {
     return q ? filas.filter(f => f.codigo.includes(q)) : filas;
   }, [turnosRango, T, bloque, UM, FX, busca, fCliente]);
 
-  const totHoras = reporte.reduce((s, r) => s + r.horas, 0);
+  const totHoras = reporte.reduce((s, r) => s + r.horas, 0);          // ordinarias + extra
+  const totNormales = reporte.reduce((s, r) => s + r.normales, 0);
+  const totExtraEmb = reporte.reduce((s, r) => s + r.extra, 0);
   const totCosto = reporte.reduce((s, r) => s + r.costo, 0);
   const maxCosto = Math.max(...reporte.map(r => r.costo), 1);
   // Fila "(sin embarque)": horas del cliente que no están asignadas a un contenedor.
@@ -2341,10 +2360,11 @@ function Embarques({ datos }) {
   const sufijo = (fCliente ? "_" + fCliente : "") + `_${desde}_${hasta}`;
 
   const filasReporte = () => [
-    ["Embarque", "Cliente(s)", "Turnos", "Personas", "Horas", "Costo ₡", "Desde", "Hasta"],
+    ["Embarque", "Cliente(s)", "Turnos", "Personas", "Horas ordinarias", "Horas extra", "Horas totales", "Costo ₡", "Desde", "Hasta"],
     ...reporte.map(r => [r.codigo, r.clientes.join(" | "), r.turnos, r.personas,
-      r.horas, r.costo, fmtLargo(r.primera), fmtLargo(r.ultima)]),
-    ["TOTAL", "", reporte.reduce((s,r)=>s+r.turnos,0), "", Math.round(totHoras*100)/100, totCosto, "", ""],
+      r.normales, r.extra, r.horas, r.costo, fmtLargo(r.primera), fmtLargo(r.ultima)]),
+    ["TOTAL", "", reporte.reduce((s,r)=>s+r.turnos,0), "", Math.round(totNormales*100)/100, Math.round(totExtraEmb*100)/100,
+      Math.round(totHoras*100)/100, totCosto, "", ""],
   ];
 
   // Detalle línea a línea: cada embarque con el turno/colaborador que aportó horas.
@@ -2427,7 +2447,7 @@ function Embarques({ datos }) {
       {/* ── KPIs ── */}
       <div className="rejilla g4" style={{ marginTop: 14 }}>
         <Kpi rot="Embarques en el rango" valor={String(nEmbReales)} sub={rotuloRango} />
-        <Kpi rot="Horas totales" valor={hh(totHoras)} sub={`Tarifa ₡${miles(T)}/h`} />
+        <Kpi rot="Horas ordinarias" valor={hh(totNormales)} sub={`${hh(totExtraEmb)} h extra · ${hh(totHoras)} h en total`} />
         <Kpi rot="Costo total" valor={crc(totCosto)} sub={crcK(totCosto)} />
         <Kpi rot="Sin embarque" valor={filaSin ? hh(filaSin.horas) : "0,00"}
           sub={filaSin ? `${crc(filaSin.costo)} sin asignar a contenedor` : "todo asignado a embarque"}
@@ -2450,7 +2470,7 @@ function Embarques({ datos }) {
             <table>
               <thead><tr>
                 <th>Embarque</th><th>Cliente(s)</th><th className="n">Turnos</th>
-                <th className="n">Personas</th><th className="n">Horas</th><th className="n">Costo</th><th className="n">%</th>
+                <th className="n">Personas</th><th className="n">Horas ordinarias</th><th className="n">Horas extra</th><th className="n">Costo</th><th className="n">%</th>
               </tr></thead>
               <tbody>
                 {reporte.map(r => (
@@ -2464,7 +2484,8 @@ function Embarques({ datos }) {
                     <td style={{ color: "var(--tinta-2)", fontSize: 12.5 }}>{r.clientes.join(", ") || "—"}</td>
                     <td className="n">{r.turnos}</td>
                     <td className="n">{r.personas}</td>
-                    <td className="n">{hh(r.horas)}</td>
+                    <td className="n">{hh(r.normales)}</td>
+                    <td className="n" style={{ color: r.extra > 0 ? "var(--alerta)" : "var(--tinta-3)" }}>{r.extra > 0 ? hh(r.extra) : "—"}</td>
                     <td className="n" style={{ fontWeight: 600 }}>{crc(r.costo)}</td>
                     <td className="n" style={{ color: "var(--tinta-2)" }}>{pct(r.costo / (totCosto || 1))}</td>
                   </tr>
@@ -2473,7 +2494,8 @@ function Embarques({ datos }) {
                   <td>Total</td><td></td>
                   <td className="n">{reporte.reduce((s,r)=>s+r.turnos,0)}</td>
                   <td className="n"></td>
-                  <td className="n">{hh(totHoras)}</td>
+                  <td className="n">{hh(totNormales)}</td>
+                  <td className="n">{hh(totExtraEmb)}</td>
                   <td className="n">{crc(totCosto)}</td>
                   <td className="n">100%</td>
                 </tr>
