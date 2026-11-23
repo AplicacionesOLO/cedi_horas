@@ -1709,7 +1709,10 @@ function Tablero({ datos, setPresupuesto, soloLectura = false }) {
     ]);
   };
 
-  const tooltipStyle = { background: MARCA.tinta, border: 0, color: "#fff", fontSize: 12, fontFamily: MARCA.dato };
+  const tooltipStyle = { background: MARCA.placa, border: `1px solid ${MARCA.linea}`, borderRadius: 8,
+    boxShadow: "0 6px 20px rgba(26,26,26,.12)", color: MARCA.tinta, fontSize: 12, fontFamily: MARCA.dato };
+  const tooltipItem = { color: MARCA.tinta };
+  const tooltipLabel = { color: MARCA.tinta2, fontWeight: 600 };
   const ejeTick = { fontSize: 10, fontFamily: MARCA.dato, fill: MARCA.tinta3 };
 
   return (
@@ -1826,7 +1829,7 @@ function Tablero({ datos, setPresupuesto, soloLectura = false }) {
                   <CartesianGrid stroke={MARCA.linea2} vertical={false} />
                   <XAxis dataKey="etiqueta" tick={ejeTick} interval={0} angle={-38} textAnchor="end" height={52} />
                   <YAxis tick={ejeTick} width={44} />
-                  <Tooltip contentStyle={tooltipStyle} labelStyle={{ color: "#8FA0B2" }}
+                  <Tooltip contentStyle={tooltipStyle} itemStyle={tooltipItem} labelStyle={tooltipLabel}
                     formatter={(v, n) => Array.isArray(v) ? [`${hh(v[0])} – ${hh(v[1])} h`, "Rango probable"]
                       : [`${hh(v)} h · ${crc(v*T)}`, n === "real" ? "Real" : "Proyectado"]} />
                   <Area dataKey="banda" stroke="none" fill={MARCA.senal} fillOpacity={0.15} isAnimationActive={false} />
@@ -1880,7 +1883,7 @@ function Tablero({ datos, setPresupuesto, soloLectura = false }) {
                   <CartesianGrid stroke={MARCA.linea2} vertical={false} />
                   <XAxis dataKey="etiqueta" tick={ejeTick} />
                   <YAxis tickFormatter={crcK} tick={ejeTick} width={52} />
-                  <Tooltip contentStyle={tooltipStyle} labelStyle={{ color: "#8FA0B2" }}
+                  <Tooltip contentStyle={tooltipStyle} itemStyle={tooltipItem} labelStyle={tooltipLabel}
                     formatter={(v, n) => [crc(v), n === "costo" ? "Costo real" : "Presupuesto"]} />
                   <Bar dataKey="costo" radius={[3,3,0,0]} barSize={26} isAnimationActive={false}>
                     {meses.map((m,i) => <Cell key={i} fill={m.presupuesto && m.costo > m.presupuesto ? MARCA.alerta : MARCA.acero} />)}
