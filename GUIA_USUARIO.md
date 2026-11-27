@@ -41,6 +41,8 @@ Pestaña **Registrar**. Es la pantalla del día a día en el patio.
    - **Repartir horas en partes iguales** divide las horas del turno entre los embarques con código.
 8. **Observaciones**: atrasos, retrabajos, incidencias.
 
+> El **embarque es obligatorio**: no se puede registrar un turno sin al menos un código de embarque. Mientras falte, el botón queda deshabilitado y el aviso "Faltan:" lo indica.
+
 Mientras escribís, abajo se ve el **cálculo en vivo**: horas del turno, horas extra, costo (normal + recargo) y embarques.
 
 ### Horas extra (por día, por persona)

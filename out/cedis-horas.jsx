@@ -907,7 +907,9 @@ function Registro({ datos, guardar, borrar, avisar }) {
   const totDia = delDia.reduce((s,t) => s + horasTurno(t.entrada, t.salida, t.descansoMin), 0);
   const totDiaCosto = costoTurnos(delDia, datos.tarifa, datos.bloqueMin, UM, FX);
 
-  const listo = f.departamento && f.colaborador.trim() && f.cliente && f.entrada && f.salida && horas > 0;
+  // El embarque es obligatorio: debe haber al menos uno con código para poder registrar.
+  const listo = f.departamento && f.colaborador.trim() && f.cliente && f.entrada && f.salida && horas > 0
+    && embValidos.length > 0;
 
   const setEmb = (i, k, v) => setF(p => {
     const e = p.embarques.map((x,j) => j === i ? { ...x, [k]: v } : x);
@@ -925,6 +927,7 @@ function Registro({ datos, guardar, borrar, avisar }) {
   });
 
   const enviar = () => {
+    if (!embValidos.length) { avisar("Registrá al menos un embarque para poder guardar el turno."); return; }
     if (!listo) return;
     guardar({
       id: f.id || "t" + Date.now() + Math.random().toString(36).slice(2,6),
@@ -998,7 +1001,7 @@ function Registro({ datos, guardar, borrar, avisar }) {
           {/* — Embarques / contenedores — */}
           <div style={{ borderTop: "1px solid var(--linea-2)", paddingTop: 14, marginTop: 4 }}>
             <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:10, gap:8, flexWrap:"wrap" }}>
-              <h3>Embarques trabajados</h3>
+              <h3>Embarques trabajados <span style={{ color: "var(--alerta)" }} title="Obligatorio">*</span></h3>
               <button className="lig" onClick={repartir} disabled={!horas}>Repartir horas en partes iguales</button>
             </div>
             {f.embarques.map((e, i) => (
@@ -1050,6 +1053,7 @@ function Registro({ datos, guardar, borrar, avisar }) {
           {!listo && <p className="kpi-s" style={{ marginTop: 8 }}>Faltan: {[
             !f.departamento && "departamento", !f.colaborador.trim() && "colaborador",
             !f.cliente && "cliente", !f.salida && "hora de salida", (f.salida && horas <= 0) && "horas válidas",
+            !embValidos.length && "al menos un embarque",
           ].filter(Boolean).join(", ")}.</p>}
         </div>
       </div>
